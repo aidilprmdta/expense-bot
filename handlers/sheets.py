@@ -394,7 +394,9 @@ async def get_monthly_summary(bulan: int = None, tahun: int = None) -> dict:
     jumlah_item  = 0
 
     for r in records:
-        tanggal = str(r.get("Tanggal", ""))
+        tanggal = str(r.get("Tanggal", "")).strip()
+        if len(tanggal) < 10:
+            continue
         # Format kolom: "26/06/2025" — match dengan mm/yyyy di posisi 3-9
         if target not in tanggal[3:]:
             continue
@@ -426,13 +428,61 @@ async def get_monthly_summary(bulan: int = None, tahun: int = None) -> dict:
 
 async def get_today_total() -> int:
     """Total pengeluaran hari ini (integer Rupiah)."""
+    summary = await get_today_summary()
+    return summary["total"]
+
+
+async def get_today_summary() -> dict:
+    """
+    Rekap pengeluaran hari ini.
+
+    Return:
+        {
+            "total"       : 85000,
+            "per_kategori": {"makan": 35000, "transport": 50000, ...},
+            "jumlah_item" : 3,
+            "periode"     : "29/06/2025",
+        }
+    """
     records  = await get_all_records()
     hari_ini = datetime.now().strftime("%d/%m/%Y")
-    return sum(
-        int(r.get("Harga", 0))
-        for r in records
-        if str(r.get("Tanggal", "")) == hari_ini
+
+    per_kategori: dict[str, int] = {}
+    total        = 0
+    jumlah_item  = 0
+
+    for r in records:
+        tanggal = str(r.get("Tanggal", "")).strip()
+        if tanggal != hari_ini:
+            continue
+
+        harga    = int(r.get("Harga", 0))
+        kategori = str(r.get("Kategori", "Lainnya")).lower()
+
+        total                    += harga
+        per_kategori[kategori]    = per_kategori.get(kategori, 0) + harga
+        jumlah_item              += 1
+
+    per_kategori_sorted = dict(
+        sorted(per_kategori.items(), key=lambda x: x[1], reverse=True)
     )
+
+    return {
+        "total"       : total,
+        "per_kategori": per_kategori_sorted,
+        "jumlah_item" : jumlah_item,
+        "periode"     : hari_ini,
+    }
+
+
+async def test_connection() -> bool:
+    """Cek apakah koneksi Google Sheets berhasil."""
+    try:
+        await asyncio.to_thread(_get_sheet)
+        return True
+    except Exception as e:
+        logger.warning(f"[sheets] test_connection gagal: {e}")
+        return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -452,6 +502,81 @@ EMOJI_KATEGORI = {
 def rupiah(angka: int) -> str:
     """Format integer ke string Rupiah. 25000 → 'Rp 25.000'"""
     return f"Rp {angka:,}".replace(",", ".")
+
+
+def _tabel_kategori(per_kat: dict, total: int) -> str:
+    """Format breakdown kategori sebagai tabel monospace untuk Telegram."""
+    if not per_kat or total <= 0:
+        return ""
+
+    baris = [
+        f"{'Kategori':<12} {'Nominal':>14}  {'%':>4}",
+        "─" * 34,
+    ]
+    for kat, jml in per_kat.items():
+        persen = round(jml / total * 100)
+        nama   = kat.title()[:11]
+        baris.append(f"{nama:<12} {rupiah(jml):>14}  {persen:>3}%")
+
+    return "```\n" + "\n".join(baris) + "\n```"
+
+
+def _tabel_ringkasan(hari: dict, bulan: dict) -> str:
+    """Tabel ringkasan total hari ini vs bulan ini."""
+    baris = [
+        f"{'Periode':<14} {'Total':>14}  {'Item':>5}",
+        "─" * 36,
+        f"{'Hari ini':<14} {rupiah(hari['total']):>14}  {hari['jumlah_item']:>5}",
+        f"{'Bulan ini':<14} {rupiah(bulan['total']):>14}  {bulan['jumlah_item']:>5}",
+    ]
+    return "```\n" + "\n".join(baris) + "\n```"
+
+
+def format_rekap_hari(summary: dict) -> str:
+    """Format rekap harian dengan tabel kategori."""
+    total   = summary["total"]
+    per_kat = summary["per_kategori"]
+    jumlah  = summary["jumlah_item"]
+    periode = summary["periode"]
+
+    baris = [
+        f"📊 *Rekap Hari Ini*",
+        f"📅 {periode}\n",
+        f"💰 Total: *{rupiah(total)}*",
+        f"📦 {jumlah} transaksi",
+    ]
+
+    tabel = _tabel_kategori(per_kat, total)
+    if tabel:
+        baris.append("\n*Per kategori:*")
+        baris.append(tabel)
+
+    return "\n".join(baris)
+
+
+def format_rekap_lengkap(hari: dict, bulan: dict, budget: int = 0) -> str:
+    """Rekap gabungan: ringkasan hari + bulan, breakdown kategori bulan ini."""
+    periode = bulan["periode"]
+
+    baris = [
+        f"📊 *Rekap Pengeluaran*",
+        f"📅 {periode}\n",
+        "*Ringkasan:*",
+        _tabel_ringkasan(hari, bulan),
+    ]
+
+    if bulan["per_kategori"]:
+        baris.append("*Breakdown bulan ini:*")
+        baris.append(_tabel_kategori(bulan["per_kategori"], bulan["total"]))
+
+    if budget > 0:
+        sisa   = budget - bulan["total"]
+        status = "✅ Aman" if sisa >= 0 else "⚠️ Over budget!"
+        baris.append(f"\n{'─' * 22}")
+        baris.append(f"🎯 Budget: {rupiah(budget)}")
+        baris.append(f"{status}: {rupiah(abs(sisa))} {'tersisa' if sisa >= 0 else 'lebih'}")
+
+    return "\n".join(baris)
 
 
 def format_rekap(summary: dict, budget: int = 0) -> str:
@@ -482,16 +607,13 @@ def format_rekap(summary: dict, budget: int = 0) -> str:
     baris = [
         f"📊 *Rekap {periode}*\n",
         f"💰 Total: *{rupiah(total)}*",
-        f"📦 {jumlah} transaksi\n",
+        f"📦 {jumlah} transaksi",
     ]
 
-    if per_kat:
-        baris.append("*Per kategori:*")
-        for kat, jml in per_kat.items():
-            persen = round(jml / total * 100) if total > 0 else 0
-            emoji  = EMOJI_KATEGORI.get(kat, "📌")
-            nama   = kat.title().ljust(12)
-            baris.append(f"{emoji} {nama} {rupiah(jml)}  ({persen}%)")
+    tabel = _tabel_kategori(per_kat, total)
+    if tabel:
+        baris.append("\n*Per kategori:*")
+        baris.append(tabel)
 
     if budget > 0:
         sisa   = budget - total

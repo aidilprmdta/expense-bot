@@ -5,7 +5,7 @@ Phase 2: Bot Dasar
 Struktur handler:
   /start        → sambut user + jelaskan cara pakai
   /help         → panduan lengkap
-  /rekap        → placeholder (aktif di Phase 6)
+  /rekap        → rekap pengeluaran dari Google Sheets
   teks biasa    → echo balik (akan diganti AI parser di Phase 3)
   foto          → konfirmasi diterima (akan diganti Gemini Vision di Phase 5)
   command lain  → pesan "tidak dikenal"
@@ -16,6 +16,7 @@ import logging
 from dotenv import load_dotenv
 
 from telegram import Update
+from telegram.error import TimedOut
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -31,6 +32,8 @@ from telegram.ext import (
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_PROXY = os.getenv("TELEGRAM_PROXY") or None
+TELEGRAM_TIMEOUT = float(os.getenv("TELEGRAM_TIMEOUT", "30"))
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -111,7 +114,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         "━━━━━━━━━━━━━━━\n"
         "📊 *Lihat rekap:*\n"
-        "/rekap        — rekap bulan ini\n"
+        "/rekap        — ringkasan hari + bulan + kategori\n"
         "/rekap hari   — rekap hari ini\n"
         "/rekap bulan  — breakdown per kategori bulan ini\n\n"
 
@@ -127,21 +130,74 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_rekap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /rekap — placeholder untuk Phase 6.
-    Di Phase 6, ini akan baca data dari Google Sheets dan tampilkan rekap.
+    /rekap         — ringkasan hari + bulan + breakdown kategori
+    /rekap hari    — rekap hari ini saja
+    /rekap bulan   — rekap bulan ini per kategori
     """
-    # ── Phase 6 placeholder ──
-    # args = context.args  # e.g. ['hari'] atau ['bulan']
-    # total = await get_monthly_total()
-    # breakdown = await get_category_breakdown()
-    # await update.message.reply_text(format_rekap(total, breakdown))
-
-    await update.message.reply_text(
-        "📊 *Fitur Rekap*\n\n"
-        "Fitur ini akan aktif di Phase 6 setelah Google Sheets terhubung.\n\n"
-        "_Stay tuned!_ 🚧",
-        parse_mode="Markdown",
+    from handlers.sheets import (
+        get_today_summary,
+        get_monthly_summary,
+        format_rekap,
+        format_rekap_hari,
+        format_rekap_lengkap,
     )
+
+    args = context.args
+    sub  = args[0].lower() if args else None
+
+    await update.message.reply_chat_action("typing")
+
+    try:
+        budget = int(os.getenv("MONTHLY_BUDGET", "0") or 0)
+
+        if sub == "hari":
+            summary = await get_today_summary()
+            if summary["jumlah_item"] == 0:
+                teks = (
+                    f"📊 *Rekap Hari Ini*\n\n"
+                    f"Belum ada pengeluaran tercatat hari ini "
+                    f"({summary['periode']})."
+                )
+            else:
+                teks = format_rekap_hari(summary)
+
+        elif sub == "bulan":
+            summary = await get_monthly_summary()
+            if summary["jumlah_item"] == 0:
+                teks = (
+                    f"📊 *Rekap {summary['periode']}*\n\n"
+                    "Belum ada pengeluaran tercatat bulan ini."
+                )
+            else:
+                teks = format_rekap(summary, budget=budget)
+
+        else:
+            hari  = await get_today_summary()
+            bulan = await get_monthly_summary()
+            if hari["jumlah_item"] == 0 and bulan["jumlah_item"] == 0:
+                teks = (
+                    f"📊 *Rekap Pengeluaran*\n\n"
+                    f"Belum ada pengeluaran tercatat di {bulan['periode']}."
+                )
+            else:
+                teks = format_rekap_lengkap(hari, bulan, budget=budget)
+
+        await update.message.reply_text(teks, parse_mode="Markdown")
+        logger.info(f"/rekap {sub or 'default'} dari user id={update.effective_user.id}")
+
+    except RuntimeError as e:
+        logger.error(f"Sheets error saat /rekap: {e}")
+        await update.message.reply_text(
+            "Maaf, gagal membaca data dari Google Sheets. 😔\n"
+            "Coba lagi sebentar ya!"
+        )
+
+    except Exception as e:
+        logger.error(f"Unexpected error saat /rekap: {e}", exc_info=True)
+        await update.message.reply_text(
+            "Maaf, terjadi kesalahan saat membuat rekap. 🙏\n"
+            "Coba lagi sebentar ya!"
+        )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -164,21 +220,8 @@ async def handle_teks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_chat_action("typing")
 
     try:
-        # ── Phase 3: Parse dengan Groq AI ─────────────────────
         items = await parse_expense(teks)
-
-        # ── Phase 4: Simpan ke Google Sheets ──────────────────
-        from handlers.sheets import append_expense_batch
-        await append_expense_batch(items)
-
-        # Kirim konfirmasi ke user
-        await update.message.reply_text(
-            format_konfirmasi(items),
-            parse_mode="Markdown",
-        )
-
     except ValueError:
-        # Teks tidak mengandung pengeluaran yang bisa diparsing
         await update.message.reply_text(
             "Hmm, aku kurang paham maksudnya. 🤔\n\n"
             "Coba tulis seperti:\n"
@@ -187,14 +230,30 @@ async def handle_teks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "`bensin 80k`",
             parse_mode="Markdown",
         )
-
+        return
     except RuntimeError as e:
-        # Error koneksi ke Groq
         logger.error(f"Groq error: {e}")
         await update.message.reply_text(
             "Maaf, AI sedang tidak bisa dihubungi. 😔\n"
             "Coba lagi dalam beberapa detik ya!"
         )
+        return
+
+    try:
+        from handlers.sheets import append_expenses_batch
+        await append_expenses_batch(items, catatan="via chat")
+    except RuntimeError as e:
+        logger.error(f"Sheets error: {e}")
+        await update.message.reply_text(
+            "Maaf, gagal menyimpan ke Google Sheets. 😔\n"
+            "Coba lagi sebentar ya!"
+        )
+        return
+
+    await update.message.reply_text(
+        format_konfirmasi(items),
+        parse_mode="Markdown",
+    )
 
 
 async def handle_foto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -312,10 +371,6 @@ def main() -> None:
             "Pastikan file .env ada dan berisi: TELEGRAM_TOKEN=xxxxxxxx"
         )
 
-    # Build application
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-    # ── Startup: cek koneksi Google Sheets ───────────────────
     async def on_startup(app):
         from handlers.sheets import test_connection
         ok = await test_connection()
@@ -327,7 +382,24 @@ def main() -> None:
                 "Cek credentials.json dan SPREADSHEET_ID di .env."
             )
 
-    app.post_init = on_startup
+    builder = (
+        ApplicationBuilder()
+        .token(TELEGRAM_TOKEN)
+        .connect_timeout(TELEGRAM_TIMEOUT)
+        .read_timeout(TELEGRAM_TIMEOUT)
+        .write_timeout(TELEGRAM_TIMEOUT)
+        .pool_timeout(TELEGRAM_TIMEOUT)
+        .get_updates_connect_timeout(TELEGRAM_TIMEOUT)
+        .get_updates_read_timeout(TELEGRAM_TIMEOUT)
+        .get_updates_write_timeout(TELEGRAM_TIMEOUT)
+        .get_updates_pool_timeout(TELEGRAM_TIMEOUT)
+        .post_init(on_startup)
+    )
+    if TELEGRAM_PROXY:
+        builder = builder.proxy(TELEGRAM_PROXY).get_updates_proxy(TELEGRAM_PROXY)
+        logger.info(f"Telegram proxy aktif: {TELEGRAM_PROXY}")
+
+    app = builder.build()
 
     # ── Command handlers ──────────────────────────────────────
     app.add_handler(CommandHandler("start",  cmd_start))
@@ -353,7 +425,17 @@ def main() -> None:
 
     # ── Start polling ─────────────────────────────────────────
     logger.info("Bot berjalan... Tekan Ctrl+C untuk stop.")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        app.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            bootstrap_retries=5,
+        )
+    except TimedOut:
+        logger.error(
+            "Gagal konek ke Telegram API (timeout). "
+            "Cek koneksi internet, firewall, atau set TELEGRAM_PROXY di .env."
+        )
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
