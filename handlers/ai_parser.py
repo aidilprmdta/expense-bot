@@ -30,13 +30,13 @@ from groq import AsyncGroq
 
 logger = logging.getLogger(__name__)
 
-MODEL = "llama-3.1-8b-instant"
-# Alternatif kalau model di atas tidak tersedia:
-# MODEL = "llama-3.3-70b-versatile"
-# MODEL = "llama3-70b-8192"
+MODEL = "openai/gpt-oss-20b"
+# Alternatif:
+# MODEL = "openai/gpt-oss-120b"
+# MODEL = "qwen/qwen3.6-27b"
 
 KATEGORI_VALID = frozenset(
-    {"makan", "transport", "belanja", "kesehatan", "hiburan", "lainnya"}
+    {"makan", "transport", "belanja", "kesehatan", "hiburan", "pemasukan", "lainnya"}
 )
 
 # Inisialisasi client satu kali (lebih efisien)
@@ -68,7 +68,7 @@ def _build_system_prompt() -> str:
     kemarin  = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
     return f"""Kamu adalah AI pencatat keuangan pribadi. \
-Ekstrak data pengeluaran dari kalimat Bahasa Indonesia.
+Ekstrak data pengeluaran dan pemasukan dari kalimat Bahasa Indonesia.
 
 TANGGAL HARI INI: {hari_ini}
 
@@ -90,6 +90,7 @@ ATURAN HARGA (WAJIB integer Rupiah, bukan string):
   Tidak disebutkan                → 0
 ═══════════════════════════════
 ATURAN KATEGORI (pilih tepat satu):
+  pemasukan  → gaji, bonus, pendapatan, komisi, uang jajan/saku masuk, transfer masuk, pemasukan jualan, bunga bank, cashback, untung, dividen, hibah, hadiah uang
   makan      → makanan, minuman, kopi, teh, warung, restoran, kafe,
                delivery food, snack, bakery, es krim
   transport  → bensin, parkir, ojek, grab, gojek, bis, kereta,
@@ -100,8 +101,8 @@ ATURAN KATEGORI (pilih tepat satu):
                suplemen, periksa, konsultasi
   hiburan    → bioskop, game, streaming, netflix, spotify, nonton,
                konser, liburan, jalan-jalan, wisata
-  lainnya    → tagihan, listrik, air, internet, pulsa, transfer,
-               top-up, cicilan, atau tidak masuk kategori di atas
+  lainnya    → tagihan, listrik, air, internet, pulsa, transfer keluar,
+               top-up, cicilan, sedekah, bayar utang, atau tidak masuk kategori di atas
 ═══════════════════════════════
 ATURAN TANGGAL (format YYYY-MM-DD):
   Tidak disebutkan         → {hari_ini}
@@ -122,6 +123,12 @@ Output: {{"items": [
   {{"nama": "Kopi", "harga": 15000, "kategori": "makan", "tanggal": "{hari_ini}"}},
   {{"nama": "Roti Bakar", "harga": 20000, "kategori": "makan", "tanggal": "{hari_ini}"}}
 ]}}
+
+Input: "gaji bulanan 5jt"
+Output: {{"items": [{{"nama": "Gaji Bulanan", "harga": 5000000, "kategori": "pemasukan", "tanggal": "{hari_ini}"}}]}}
+
+Input: "dapat uang saku 50rb kemarin"
+Output: {{"items": [{{"nama": "Uang Saku", "harga": 50000, "kategori": "pemasukan", "tanggal": "{kemarin}"}}]}}
 
 Input: "belanja alfamart: air mineral 5rb, sabun 12rb, rinso 25rb"
 Output: {{"items": [
@@ -202,8 +209,9 @@ async def _call_groq(teks: str) -> str:
                 {"role": "system", "content": _build_system_prompt()},
                 {"role": "user",   "content": teks},
             ],
-            temperature=0.1,   # rendah = konsisten, deterministik
-            max_tokens=1024,
+            temperature=0.6,         # gpt-oss-20b (reasoning model) butuh >= 0.6
+            max_tokens=4096,         # reasoning model butuh ruang untuk think
+            include_reasoning=False, # matikan reasoning tokens — content harus JSON bersih
             response_format={"type": "json_object"},
         )
         return response.choices[0].message.content.strip()
@@ -400,6 +408,7 @@ EMOJI_KATEGORI: dict[str, str] = {
     "belanja"   : "🛒",
     "kesehatan" : "💊",
     "hiburan"   : "🎮",
+    "pemasukan" : "💰",
     "lainnya"   : "📌",
 }
 
