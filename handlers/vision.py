@@ -1,3 +1,23 @@
+"""
+handlers/vision.py
+──────────────────
+OCR struk belanja via Groq Vision (llama-4-scout).
+
+Kenapa Groq, bukan AgentRouter:
+  AgentRouter WAF memblokir base64 image di body request untuk model Claude
+  via OpenAI-compatible endpoint (content-blocked). Groq tidak punya masalah ini
+  dan sudah punya GROQ_API_KEY dari Phase 3.
+
+Model: meta-llama/llama-4-scout-17b-16e-instruct
+  ✅ Support vision (image_url + base64)
+  ✅ Support JSON mode
+  ✅ Free tier Groq
+  ✅ Super cepat (LPU hardware)
+
+Flow:
+  Foto bytes → PIL (EXIF fix, resize) → base64 → Groq Vision → JSON → normalize → list[dict]
+"""
+
 import io
 import os
 import re
@@ -9,377 +29,391 @@ from typing import Optional
 
 import PIL.Image
 import PIL.ExifTags
-from openai import AsyncOpenAI
+from groq import AsyncGroq
+
+# ─────────────────────────────────────────────────────────────
+# SETUP
+# ─────────────────────────────────────────────────────────────
 
 logger = logging.getLogger(__name__)
 
-# Konfigurasi Model
-VISION_MODEL    = "gpt-4o-mini" # Model GPT yang cepat, murah, dan pintar baca gambar
-MAX_IMAGE_BYTES = 3_500_000   
-MAX_DIMENSION   = 2048        
+VISION_MODEL = "qwen/qwen3.6-27b"  # pengganti resmi llama-4-scout (deprecated Jun 2026)
+MAX_DIMENSION = 2048   # resize jika lebih besar (px)
+MAX_MB        = 18     # Groq limit 20MB, kita pakai 18MB untuk aman
 
 KATEGORI_VALID = frozenset(
-    {"makan", "transport", "belanja", "kesehatan", "hiburan", "lainnya"}
+    {"makan", "transport", "belanja", "kesehatan", "hiburan", "pemasukan", "lainnya"}
 )
-
 EMOJI_KATEGORI = {
     "makan"    : "🍽️",
     "transport": "🚗",
     "belanja"  : "🛒",
     "kesehatan": "💊",
     "hiburan"  : "🎮",
+    "pemasukan": "💰",
     "lainnya"  : "📌",
 }
 
-_client: Optional[AsyncOpenAI] = None
+_client: Optional[AsyncGroq] = None
 
-def _get_client() -> AsyncOpenAI:
-    """Inisialisasi client OpenAI yang mengarah ke AgentRouter."""
+
+def _get_client() -> AsyncGroq:
     global _client
     if _client is None:
-        api_key = os.getenv("AGENTROUTER_API_KEY")
+        api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
             raise RuntimeError(
-                "AGENTROUTER_API_KEY tidak ditemukan!\n"
-                "Tambahkan ke .env: AGENTROUTER_API_KEY=sk-..."
+                "GROQ_API_KEY tidak ditemukan!\n"
+                "Pastikan sudah ada di .env: GROQ_API_KEY=gsk_..."
             )
-        _client = AsyncOpenAI(
-            api_key=api_key,
-            base_url="https://api.agentrouter.org/v1"
-        )
-        logger.info(f"[vision] AgentRouter Client siap (Model: {VISION_MODEL}).")
+        _client = AsyncGroq(api_key=api_key)
+        logger.info(f"[vision] Groq client siap — model: {VISION_MODEL}")
     return _client
 
+
+# ─────────────────────────────────────────────────────────────
+# OCR PROMPT
+# ─────────────────────────────────────────────────────────────
+
 def _build_prompt(caption: str = "") -> str:
-    """
-    Bangun prompt OCR yang komprehensif.
-    caption dari user dipakai sebagai konteks tambahan (tgl, nama toko, dll).
-    """
     hari_ini = datetime.now().strftime("%Y-%m-%d")
-    ctx_line = f'\nKonteks dari user: "{caption.strip()}"' if caption.strip() else ""
+    ctx = f'\nKonteks dari user: "{caption.strip()}"' if caption.strip() else ""
 
-    return f"""Kamu adalah AI OCR untuk struk/nota/kwitansi belanja Indonesia.{ctx_line}
+    return f"""Kamu adalah AI OCR untuk struk/nota/kwitansi belanja Indonesia.{ctx}
 
-Baca foto ini dan ekstrak semua ITEM INDIVIDUAL yang dibeli.
+Baca gambar ini. Ekstrak semua ITEM INDIVIDUAL yang dibeli.
 
-══════════════════════════════════
-ATURAN EKSTRAKSI:
-1. Ambil hanya item produk/jasa yang dibeli user
-2. SKIP baris berikut (jangan masukkan ke output):
-   • Total / Subtotal / Grand Total
-   • Pajak (PPN 11%, Tax, Service Charge)
-   • Diskon keseluruhan / promo member
-   • Ongkos kirim / biaya pengiriman
-   • Kembalian / change
-3. Quantity: jika "2 × Rp 5.000" → harga = 10000 (total per item)
-4. Diskon per item: pakai harga setelah diskon
-5. Nama item: hapus kode SKU / barcode (misal "123456 Aqua" → "Aqua")
-6. Tanggal: ambil dari struk jika tercetak jelas, jika tidak → {hari_ini}
+ATURAN:
+1. Ambil hanya item produk/jasa (nama + harga)
+2. SKIP: Total, Subtotal, Pajak/PPN, Diskon total, Ongkir, Kembalian, point
+3. Qty: "2 × Rp 5.000" → harga = 10000 (total per baris item)
+4. Diskon per item: pakai harga SETELAH diskon
+5. Nama item: hapus kode SKU/barcode di awal ("123456 Aqua" → "Aqua")
+6. Tanggal: ambil dari struk jika ada, jika tidak → {hari_ini}
 
-══════════════════════════════════
-ATURAN KATEGORI (pilih SATU yang paling tepat):
-  makan      → makanan, minuman, kopi, teh, resto, kafe, warung,
-               bakery, snack, delivery food, es krim
-  transport  → bensin, solar, pertamax, tol, parkir, grab, gojek,
-               ojek, bis, kereta, taksi, bbm, spbu
-  belanja    → supermarket, indomaret, alfamart, toko, baju, sepatu,
-               elektronik, perabot, sabun, deterjen, peralatan rumah
-  kesehatan  → obat, vitamin, suplemen, apotek, klinik, dokter,
-               puskesmas, lab, periksa, konsultasi
-  hiburan    → bioskop, game, streaming, netflix, spotify, konser,
-               wisata, liburan, rekreasi, nonton
-  lainnya    → laundry, bengkel, service hp, tagihan, pulsa, topup,
-               transfer, atau tidak masuk kategori di atas
+KATEGORI (pilih SATU yang paling cocok):
+  pemasukan  → gaji, bonus, refund, cashback, transfer masuk, pendapatan
+  makan      → makanan, minuman, kopi, warung, resto, kafe, snack, bakery
+  transport  → bensin, pertamax, solar, tol, parkir, grab, gojek, ojek, bbm
+  belanja    → supermarket, indomaret, alfamart, toko, baju, elektronik, sabun, deterjen
+  kesehatan  → obat, vitamin, apotek, klinik, dokter, puskesmas
+  hiburan    → bioskop, game, streaming, konser, wisata
+  lainnya    → laundry, bengkel, tagihan, pulsa, atau tidak masuk kategori di atas
 
-══════════════════════════════════
-OUTPUT: JSON murni saja — tidak ada teks lain, tidak ada markdown.
+OUTPUT: JSON saja. Tidak ada teks lain. Format:
+{{"items": [{{"nama": "string", "harga": integer, "kategori": "string", "tanggal": "YYYY-MM-DD"}}]}}
 
-Format wajib (selalu pakai wrapper "items"):
-{{"items": [
-  {{"nama": "Nama Item", "harga": 25000, "kategori": "belanja", "tanggal": "{hari_ini}"}}
-]}}
+Jika bukan struk atau tidak ada item: {{"items": []}}"""
 
-Jika foto bukan struk atau tidak ada item terbaca: {{"items": []}}
-"""
 
-def _prepare_image(image_bytes: bytes) -> PIL.Image.Image:
+# ─────────────────────────────────────────────────────────────
+# IMAGE PREPARATION
+# ─────────────────────────────────────────────────────────────
+
+def _prepare_image(image_bytes: bytes) -> tuple[bytes, str]:
     """
-    Buka image, koreksi rotasi EXIF, resize jika terlalu besar.
+    Buka, koreksi EXIF, resize, compress → return (bytes_siap_kirim, media_type).
+    Groq limit: 20MB. Output kita jaga di bawah 18MB.
     """
     try:
         img = PIL.Image.open(io.BytesIO(image_bytes))
     except Exception as e:
-        raise ValueError(f"File gambar tidak bisa dibuka: {e}") from e
+        raise ValueError(f"Gambar tidak bisa dibuka: {e}") from e
 
+    fmt        = (img.format or "JPEG").upper()
+    media_type = "image/png" if fmt == "PNG" else "image/jpeg"
+
+    # ── Koreksi rotasi EXIF ───────────────────────────────────
     try:
-        exif_data = img._getexif()
-        if exif_data:
-            orientation_key = next(
+        exif = img._getexif()
+        if exif:
+            ori_key = next(
                 (k for k, v in PIL.ExifTags.TAGS.items() if v == "Orientation"),
                 None,
             )
-            if orientation_key and orientation_key in exif_data:
-                orientation = exif_data[orientation_key]
-                ROTATE_MAP = {
-                    3: PIL.Image.ROTATE_180,
-                    6: PIL.Image.ROTATE_270,
-                    8: PIL.Image.ROTATE_90,
-                }
-                if orientation in ROTATE_MAP:
-                    img = img.transpose(ROTATE_MAP[orientation])
-                    logger.debug(f"[vision] EXIF rotation applied: {orientation}")
-    except (AttributeError, Exception):
+            if ori_key and ori_key in exif:
+                ROTATE = {3: PIL.Image.ROTATE_180, 6: PIL.Image.ROTATE_270, 8: PIL.Image.ROTATE_90}
+                if exif[ori_key] in ROTATE:
+                    img = img.transpose(ROTATE[exif[ori_key]])
+    except Exception:
         pass
 
+    # ── Convert ke RGB ────────────────────────────────────────
     if img.mode in ("RGBA", "P", "LA"):
-        img = img.convert("RGB")
+        img        = img.convert("RGB")
+        media_type = "image/jpeg"
 
+    # ── Resize jika terlalu besar ─────────────────────────────
     w, h = img.size
     if w > MAX_DIMENSION or h > MAX_DIMENSION:
-        ratio     = min(MAX_DIMENSION / w, MAX_DIMENSION / h)
-        new_w     = int(w * ratio)
-        new_h     = int(h * ratio)
-        img       = img.resize((new_w, new_h), PIL.Image.LANCZOS)
-        logger.info(f"[vision] Resize: {w}×{h} → {new_w}×{new_h}")
+        ratio = min(MAX_DIMENSION / w, MAX_DIMENSION / h)
+        img   = img.resize((int(w * ratio), int(h * ratio)), PIL.Image.LANCZOS)
+        logger.info(f"[vision] Resize: {w}×{h} → {img.size[0]}×{img.size[1]}")
 
-    return img
+    # ── Compress ke JPEG jika ukuran masih besar ──────────────
+    buf     = io.BytesIO()
+    quality = 85
+    save_fmt = "PNG" if media_type == "image/png" else "JPEG"
 
-async def _call_vision_api(img: PIL.Image.Image, caption: str = "") -> str:
+    if save_fmt == "JPEG":
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        # Turunkan quality jika masih > 18MB
+        while buf.tell() > MAX_MB * 1024 * 1024 and quality > 40:
+            quality -= 10
+            buf      = io.BytesIO()
+            img.save(buf, format="JPEG", quality=quality, optimize=True)
+        if quality < 85:
+            logger.info(f"[vision] Compressed JPEG quality → {quality}")
+    else:
+        img.save(buf, format="PNG", optimize=True)
+
+    out_bytes = buf.getvalue()
+    logger.info(
+        f"[vision] Image siap: {img.size[0]}×{img.size[1]}px | "
+        f"{media_type} | {len(out_bytes)/1024:.1f} KB"
+    )
+    return out_bytes, media_type
+
+
+# ─────────────────────────────────────────────────────────────
+# GROQ VISION CALL
+# ─────────────────────────────────────────────────────────────
+
+async def _call_groq_vision(
+    img_bytes : bytes,
+    media_type: str,
+    caption   : str = "",
+) -> str:
     """
-    Kirim image ke API (AgentRouter), return raw JSON string.
+    Kirim image ke Groq Vision (llama-4-scout).
+    Pakai JSON mode supaya output selalu JSON bersih.
     """
-    client = _get_client()
-    prompt_text = _build_prompt(caption)
-
-    # Convert PIL Image kembali ke bytes lalu ke base64 agar bisa dibaca AI
-    buffered = io.BytesIO()
-    img.save(buffered, format="JPEG")
-    img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+    client   = _get_client()
+    prompt   = _build_prompt(caption)
+    b64_data = base64.b64encode(img_bytes).decode("utf-8")
+    data_uri = f"data:{media_type};base64,{b64_data}"
 
     try:
         response = await client.chat.completions.create(
-            model=VISION_MODEL,
-            messages=[
+            model           = VISION_MODEL,
+            response_format = {"type": "json_object"},   # paksa output JSON
+            temperature     = 0.1,
+            max_tokens      = 4096,
+            messages        = [
                 {
-                    "role": "user",
+                    "role"   : "user",
                     "content": [
-                        {"type": "text", "text": prompt_text},
+                        # Groq: teks DULU, baru image (urutan penting)
+                        {"type": "text", "text": prompt},
                         {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{img_b64}"
-                            }
-                        }
-                    ]
+                            "type"     : "image_url",
+                            "image_url": {"url": data_uri},
+                        },
+                    ],
                 }
             ],
-            temperature=0.1,
-            # Kita paksa AI agar menghasilkan format JSON
-            response_format={ "type": "json_object" }
         )
-        
-        raw = response.choices[0].message.content
-        if not raw or not raw.strip():
-            raise RuntimeError("AI mengembalikan respons kosong.")
-            
-        logger.debug(f"[vision] Raw response ({len(raw)} chars): {raw[:200]}...")
-        return raw.strip()
-        
     except Exception as e:
-        logger.error(f"[vision] API error: {e}")
-        raise RuntimeError(f"Gagal memanggil AI Vision: {e}") from e
+        logger.error(f"[vision] Groq Vision error: {e}")
+        raise RuntimeError(f"Gagal memanggil Groq Vision: {e}") from e
+
+    raw = response.choices[0].message.content
+    if not raw or not raw.strip():
+        raise RuntimeError("Groq mengembalikan respons kosong.")
+
+    logger.debug(f"[vision] Raw ({len(raw)} chars): {raw[:200]}")
+    return raw.strip()
+
+
+# ─────────────────────────────────────────────────────────────
+# JSON PARSING (3 fallback)
+# ─────────────────────────────────────────────────────────────
 
 def _parse_json_safe(raw: str) -> dict | list:
-    """
-    Parse JSON dari AI dengan aman.
-    """
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
         pass
-
-    cleaned = re.sub(r"```(?:json)?\s*", "", raw)
-    cleaned = re.sub(r"```", "", cleaned).strip()
+    cleaned = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
         pass
-
     match = re.search(r"\{[\s\S]*\}", raw)
     if match:
         try:
             return json.loads(match.group())
         except json.JSONDecodeError:
             pass
-
     logger.warning(f"[vision] Gagal parse JSON. Raw: {raw[:150]}")
     return {"items": []}
+
+
+# ─────────────────────────────────────────────────────────────
+# NORMALISASI
+# ─────────────────────────────────────────────────────────────
 
 def _normalize_items(raw_items: list) -> list[dict]:
     hari_ini = datetime.now().strftime("%Y-%m-%d")
     result   = []
-
     for item in raw_items:
         if not isinstance(item, dict):
             continue
-
         nama     = _norm_nama(item.get("nama", ""))
         harga    = _norm_harga(item.get("harga", 0))
         kategori = _norm_kategori(item.get("kategori", "belanja"))
         tanggal  = _norm_tanggal(item.get("tanggal", hari_ini))
-
         if not nama or nama.lower() in {"", "none", "null", "item", "-"}:
             continue
-
-        result.append({
-            "nama"    : nama,
-            "harga"   : harga,
-            "kategori": kategori,
-            "tanggal" : tanggal,
-        })
-
+        result.append({"nama": nama, "harga": harga, "kategori": kategori, "tanggal": tanggal})
     return result
 
+
 def _norm_nama(v) -> str:
-    if not v:
-        return ""
-    nama = str(v).strip()
-    nama = re.sub(r"^\d{4,13}\s+", "", nama)
-    return nama.title()
+    if not v: return ""
+    s = str(v).strip()
+    s = re.sub(r"^\d{4,13}\s+", "", s)   # hapus kode SKU
+    return s.title()
+
 
 def _norm_harga(v) -> int:
-    if isinstance(v, bool):
-        return 0
-    if isinstance(v, int):
-        return max(0, v)
-    if isinstance(v, float):
-        return max(0, int(round(v)))
+    if isinstance(v, bool):  return 0
+    if isinstance(v, int):   return max(0, v)
+    if isinstance(v, float): return max(0, int(round(v)))
     if isinstance(v, str):
-        s = str(v).lower().strip()
-        s = s.replace("rp", "").replace(" ", "")
+        s = str(v).lower().strip().replace("rp", "").replace(" ", "")
         if re.search(r"(jt|juta)", s):
             n = re.sub(r"[^\d.,]", "", s).replace(",", ".")
-            try:
-                return int(float(n) * 1_000_000)
-            except ValueError:
-                pass
+            try: return int(float(n) * 1_000_000)
+            except ValueError: pass
         if re.search(r"(rb|ribu|k\b)", s):
             n = re.sub(r"[^\d.,]", "", s).replace(",", ".")
-            try:
-                return int(float(n) * 1_000)
-            except ValueError:
-                pass
+            try: return int(float(n) * 1_000)
+            except ValueError: pass
         digits = re.sub(r"[^\d]", "", s)
         return int(digits) if digits else 0
     return 0
 
+
 def _norm_kategori(v) -> str:
     k = str(v).lower().strip()
-    if k in KATEGORI_VALID:
-        return k
-    FUZZY: dict[str, str] = {
+    if k in KATEGORI_VALID: return k
+    FUZZY = {
         "food": "makan", "makanan": "makan", "minuman": "makan",
-        "restoran": "makan", "kafe": "makan", "cafe": "makan",
-        "restaurant": "makan", "kuliner": "makan",
+        "restoran": "makan", "kafe": "makan", "restaurant": "makan",
         "supermarket": "belanja", "minimarket": "belanja",
-        "toko": "belanja", "grocery": "belanja", "groceries": "belanja",
-        "shopping": "belanja", "kebutuhan": "belanja",
-        "transportasi": "transport", "bensin": "transport",
-        "bbm": "transport", "ojek": "transport", "fuel": "transport",
-        "obat": "kesehatan", "dokter": "kesehatan", "health": "kesehatan",
-        "apotek": "kesehatan", "pharmacy": "kesehatan",
-        "entertainment": "hiburan", "nonton": "hiburan", "game": "hiburan",
+        "grocery": "belanja", "groceries": "belanja", "shopping": "belanja",
+        "transportasi": "transport", "bensin": "transport", "bbm": "transport",
+        "obat": "kesehatan", "dokter": "kesehatan", "apotek": "kesehatan",
+        "entertainment": "hiburan", "nonton": "hiburan",
     }
     return FUZZY.get(k, "lainnya")
 
+
 def _norm_tanggal(v) -> str:
     hari_ini = datetime.now().strftime("%Y-%m-%d")
-    if not v or str(v).strip() in ("", "null", "none"):
-        return hari_ini
+    if not v or str(v).strip() in ("", "null", "none"): return hari_ini
     v = str(v).strip()
     try:
         datetime.strptime(v, "%Y-%m-%d")
         return v
-    except ValueError:
-        pass
+    except ValueError: pass
     for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d", "%d %b %Y", "%d %B %Y"):
-        try:
-            return datetime.strptime(v, fmt).strftime("%Y-%m-%d")
-        except ValueError:
-            continue
+        try: return datetime.strptime(v, fmt).strftime("%Y-%m-%d")
+        except ValueError: continue
     return hari_ini
+
+
+# ─────────────────────────────────────────────────────────────
+# FUNGSI UTAMA
+# ─────────────────────────────────────────────────────────────
 
 async def ocr_struk(image_bytes: bytes, caption: str = "") -> list[dict]:
     """
-    OCR foto struk belanja → list item pengeluaran terstruktur.
+    OCR foto struk → list item pengeluaran terstruktur.
+
+    Args:
+        image_bytes : bytes foto dari Telegram
+        caption     : teks caption user (opsional, jadi konteks AI)
+
+    Returns:
+        list[dict]  : [{"nama", "harga", "kategori", "tanggal"}, ...]
+
+    Raises:
+        ValueError  : Foto tidak valid / tidak ada item terbaca
+        RuntimeError: Groq API error
     """
     if not image_bytes:
         raise ValueError("Image bytes kosong.")
 
     logger.info(
-        f"[vision] OCR dimulai — "
-        f"size={len(image_bytes):,} bytes, caption='{caption}'"
+        f"[vision] OCR mulai — {len(image_bytes):,} bytes | caption='{caption}'"
     )
 
+    # 1. Prepare image (EXIF fix, resize, compress)
     try:
-        img = _prepare_image(image_bytes)
-        logger.info(f"[vision] Image siap: {img.size[0]}×{img.size[1]} px, mode={img.mode}")
-    except ValueError as e:
+        ready_bytes, media_type = _prepare_image(image_bytes)
+    except ValueError:
         raise
     except Exception as e:
         raise ValueError(f"Gagal memproses gambar: {e}") from e
 
-    # ── Panggil fungsi API yang sudah disesuaikan ─────────────
-    raw = await _call_vision_api(img, caption)
+    # 2. Panggil Groq Vision
+    raw = await _call_groq_vision(ready_bytes, media_type, caption)
 
+    # 3. Parse JSON
     data = _parse_json_safe(raw)
-
     if isinstance(data, dict):
         raw_items = data.get("items", [])
-        if isinstance(raw_items, dict):        
-            raw_items = [raw_items]
+        if isinstance(raw_items, dict): raw_items = [raw_items]
     elif isinstance(data, list):
         raw_items = data
     else:
         raw_items = []
 
+    # 4. Normalize
     items = _normalize_items(raw_items)
 
     if not items:
         raise ValueError(
-            "Tidak ada item yang berhasil dibaca dari foto.\n\n"
-            "Tips:\n"
-            "• Pastikan foto terang dan fokus\n"
-            "• Foto dari atas, struk lurus (tidak miring)\n"
-            "• Seluruh struk masuk dalam frame"
+            "Tidak ada item yang berhasil dibaca dari foto ini.\n\n"
+            "Tips foto yang bagus:\n"
+            "• Pencahayaan cukup terang\n"
+            "• Struk lurus, tidak miring\n"
+            "• Seluruh struk masuk dalam frame\n"
+            "• Hindari bayangan & pantulan"
         )
 
-    logger.info(f"[vision] Selesai — {len(items)} item diekstrak.")
+    logger.info(f"[vision] ✅ {len(items)} item diekstrak.")
     return items
 
-def rupiah(angka: int) -> str:
-    return f"Rp {angka:,}".replace(",", ".")
+
+# ─────────────────────────────────────────────────────────────
+# FORMAT PESAN TELEGRAM
+# ─────────────────────────────────────────────────────────────
+
+def rupiah(n: int) -> str:
+    return f"Rp {n:,}".replace(",", ".")
+
 
 def format_struk_summary(items: list[dict], toko: str = "") -> str:
-    if not items:
-        return "Tidak ada item yang berhasil dibaca."
-
-    header = f"📷 *Struk {'`' + toko + '`' + ' ' if toko else ''}berhasil dibaca!*\n"
-    baris  = [header]
-
-    total = 0
+    if not items: return "Tidak ada item yang berhasil dibaca."
+    nama_toko = f"`{toko}` " if toko else ""
+    baris     = [f"📷 *Struk {nama_toko}berhasil dibaca!*\n"]
+    total     = 0
     for item in items:
-        emoji = EMOJI_KATEGORI.get(item["kategori"], "📌")
-        nama  = item["nama"]
-        hrg   = item["harga"]
-        total += hrg
-        baris.append(f"{emoji} {nama}  —  {rupiah(hrg)}")
-
+        emoji  = EMOJI_KATEGORI.get(item["kategori"], "📌")
+        total += item["harga"]
+        baris.append(f"{emoji} {item['nama']}  —  {rupiah(item['harga'])}")
     baris.append(f"{'─' * 28}")
     baris.append(f"📦 *{len(items)} item*  |  💰 *Total: {rupiah(total)}*")
     baris.append("✅ _Tersimpan ke Google Sheets_")
-
     return "\n".join(baris)
+
+
+# ─────────────────────────────────────────────────────────────
+# TEST MANUAL: python -m handlers.vision struk.jpg
+# ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import sys
@@ -387,7 +421,6 @@ if __name__ == "__main__":
     from dotenv import load_dotenv
 
     load_dotenv()
-
     logging.basicConfig(
         format="%(asctime)s | %(levelname)s | %(message)s",
         level=logging.INFO,
@@ -395,26 +428,23 @@ if __name__ == "__main__":
 
     async def run_test(path: str):
         print("=" * 55)
-        print(f"TEST OCR STRUK: {path}")
+        print(f"TEST OCR STRUK (Groq Vision): {path}")
         print("=" * 55)
-
         with open(path, "rb") as f:
             img_bytes = f.read()
-
         try:
             items = await ocr_struk(img_bytes, caption="test manual")
             print(f"\n{format_struk_summary(items)}\n")
-            print("\nData mentah:")
+            print("Data mentah:")
             for i, item in enumerate(items, 1):
                 print(f"  [{i}] {item}")
         except ValueError as e:
-            print(f"ValueError: {e}")
+            print(f"\nValueError: {e}")
         except RuntimeError as e:
-            print(f"RuntimeError: {e}")
+            print(f"\nRuntimeError: {e}")
 
-    # Jalankan: python -m handlers.vision foto_struk.jpg
     if len(sys.argv) < 2:
-        print("Usage: python -m handlers.vision <path_to_receipt_image>")
-        print("Contoh: python -m handlers.vision struk_test.jpg")
+        print("Usage: python -m handlers.vision <path_gambar>")
+        print("Contoh: python -m handlers.vision struk.jpg")
     else:
         asyncio.run(run_test(sys.argv[1]))
