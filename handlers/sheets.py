@@ -357,11 +357,21 @@ async def append_expenses_batch(items: list[dict], catatan: str = "-") -> None:
 # ─────────────────────────────────────────────────────────────
 
 def _sync_get_all_records() -> list[dict]:
-    """Ambil semua records. Sinkron."""
+    """
+    Ambil semua records dari Google Sheets sebagai list of dict.
+
+    PENTING:
+    - numericise_ignore=["all"]: semua kolom return sebagai string.
+      Tanpa ini, kolom Tanggal yang diformat sebagai Date di Sheets
+      dikembalikan sebagai angka serial (misal 46033, bukan '05/07/2026').
+      _safe_int() di rekap.py handle parsing Harga dari string.
+
+    - Tidak pakai expected_headers: lebih toleran jika header Sheets
+      berbeda sedikit (spasi ekstra, case berbeda, dll).
+    """
     sheet = _get_sheet()
     return sheet.get_all_records(
-        expected_headers=HEADER,
-        value_render_option="UNFORMATTED_VALUE",  # angka tetap integer
+        numericise_ignore=["all"],
     )
 
 
@@ -495,6 +505,7 @@ EMOJI_KATEGORI = {
     "belanja"   : "🛒",
     "kesehatan" : "💊",
     "hiburan"   : "🎮",
+    "pemasukan" : "💰",
     "lainnya"   : "📌",
 }
 
