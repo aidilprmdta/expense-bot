@@ -172,7 +172,7 @@ def _aggregate(records: list[dict], start: date, end: date) -> dict:
             harga = 0
 
         kat = str(r.get("Kategori", "Lainnya")).lower().strip()
-        if kat not in EMOJI_KAT:
+        if not kat:
             kat = "lainnya"
 
         per_kat[kat]["total"] += harga
@@ -474,6 +474,45 @@ def _fmt_minggu(data: dict) -> str:
 # ─────────────────────────────────────────────────────────────
 # BUILDER PESAN
 # ─────────────────────────────────────────────────────────────
+
+def resolve_periode(
+    mode     : str      = "bulan",
+    tgt_bulan: int|None = None,
+    tgt_tahun: int|None = None,
+) -> tuple[date, date, str]:
+    """
+    Ubah mode ("hari"/"kemarin"/"minggu"/"bulan"/"tahun") jadi rentang
+    tanggal (start, end) + label periode yang bisa dibaca manusia.
+
+    Dipakai bersama oleh /rekap dan /grafik supaya logika rentang
+    tanggal tidak duplikat.
+    """
+    now   = datetime.now()
+    today = now.date()
+
+    if mode == "hari":
+        return today, today, "Hari Ini"
+
+    if mode == "kemarin":
+        kemarin = today - timedelta(days=1)
+        return kemarin, kemarin, "Kemarin"
+
+    if mode == "minggu":
+        start = today - timedelta(days=6)
+        return start, today, "7 Hari Terakhir"
+
+    if mode == "tahun":
+        start = date(now.year, 1, 1)
+        end   = date(now.year, 12, 31)
+        return start, end, f"Tahun {now.year}"
+
+    # default / "bulan"
+    b     = tgt_bulan or now.month
+    t     = tgt_tahun or now.year
+    start = date(t, b, 1)
+    end   = date(t, b, calendar.monthrange(t, b)[1])
+    return start, end, f"{NAMA_BULAN[b]} {t}"
+
 
 async def build_rekap_pesan(
     records       : list[dict],
