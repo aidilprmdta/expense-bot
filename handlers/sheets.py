@@ -380,6 +380,92 @@ async def get_all_records() -> list[dict]:
     return await asyncio.to_thread(_sync_get_all_records)
 
 
+# ─────────────────────────────────────────────────────────────
+# BUDGET PERSISTEN — disimpan di tab "Config" pada spreadsheet
+# yang sama, supaya tidak hilang saat bot di-restart (beda
+# dengan os.environ yang cuma hidup selama proses berjalan).
+# ─────────────────────────────────────────────────────────────
+
+CONFIG_SHEET_NAME = "Config"
+BUDGET_KEY        = "BUDGET_BULANAN"
+
+_cached_config_sheet: Optional[gspread.Worksheet] = None
+
+
+def _connect_to_config_sheet() -> gspread.Worksheet:
+    """
+    Buka (atau buat) worksheet "Config" di spreadsheet yang sama dengan
+    data expense. Dipakai untuk menyimpan setting kecil seperti budget.
+    Sinkron — dipanggil via asyncio.to_thread().
+    """
+    _get_sheet()  # pastikan koneksi utama sudah terbentuk (reuse auth)
+    spreadsheet_id = os.getenv("SPREADSHEET_ID")
+    creds          = _load_credentials()
+    client         = gspread.authorize(creds)
+    workbook       = client.open_by_key(spreadsheet_id)
+
+    try:
+        config_sheet = workbook.worksheet(CONFIG_SHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        config_sheet = workbook.add_worksheet(
+            title=CONFIG_SHEET_NAME, rows=10, cols=2
+        )
+        config_sheet.update("A1:B1", [["Key", "Value"]])
+        config_sheet.format(
+            "A1:B1",
+            {
+                "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+                "backgroundColor": HEADER_BG_COLOR,
+            },
+        )
+        logger.info(f"[sheets] Tab '{CONFIG_SHEET_NAME}' dibuat.")
+
+    return config_sheet
+
+
+def _get_config_sheet() -> gspread.Worksheet:
+    """Return cached config sheet. Reconnect otomatis jika kosong."""
+    global _cached_config_sheet
+    if _cached_config_sheet is not None:
+        return _cached_config_sheet
+    _cached_config_sheet = _connect_to_config_sheet()
+    return _cached_config_sheet
+
+
+def _sync_get_budget() -> int:
+    """Baca nilai BUDGET_BULANAN dari tab Config. Default 0 jika belum diset."""
+    try:
+        sheet = _get_config_sheet()
+        cell  = sheet.find(BUDGET_KEY)
+        if cell is None:
+            return 0
+        value = sheet.cell(cell.row, cell.col + 1).value
+        return max(0, int(str(value).replace(".", "").replace(",", "").strip() or 0))
+    except Exception as e:
+        logger.warning(f"[sheets] Gagal baca budget: {e}")
+        return 0
+
+
+def _sync_set_budget(value: int) -> None:
+    """Simpan/update nilai BUDGET_BULANAN di tab Config."""
+    sheet = _get_config_sheet()
+    cell  = sheet.find(BUDGET_KEY)
+    if cell is None:
+        sheet.append_row([BUDGET_KEY, value])
+    else:
+        sheet.update_cell(cell.row, cell.col + 1, value)
+
+
+async def get_budget() -> int:
+    """Ambil budget bulanan yang tersimpan permanen (persist antar restart)."""
+    return await asyncio.to_thread(_sync_get_budget)
+
+
+async def set_budget(value: int) -> None:
+    """Simpan budget bulanan secara permanen ke Google Sheets."""
+    await asyncio.to_thread(_sync_set_budget, value)
+
+
 async def get_monthly_summary(bulan: int = None, tahun: int = None) -> dict:
     """
     Rekap pengeluaran per bulan.
