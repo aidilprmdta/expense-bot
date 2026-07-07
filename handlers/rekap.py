@@ -22,7 +22,7 @@ from collections import defaultdict
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from handlers.sheets import get_all_records
+from handlers.sheets import get_all_records, get_budget, set_budget
 
 logger = logging.getLogger(__name__)
 
@@ -134,12 +134,6 @@ def _parse_tgl(s: str) -> date | None:
         pass
         
     return None
-
-def _get_budget() -> int:
-    try:
-        return max(0, int(os.getenv("BUDGET_BULANAN", 0)))
-    except ValueError:
-        return 0
 
 # ─────────────────────────────────────────────────────────────
 # AGREGASI
@@ -482,15 +476,22 @@ def _fmt_minggu(data: dict) -> str:
 # ─────────────────────────────────────────────────────────────
 
 async def build_rekap_pesan(
-    records  : list[dict],
-    mode     : str      = "default",
-    tgt_bulan: int|None = None,
-    tgt_tahun: int|None = None,
+    records       : list[dict],
+    mode          : str      = "default",
+    tgt_bulan     : int|None = None,
+    tgt_tahun     : int|None = None,
+    budget_override: int|None = None,
 ) -> str:
-    """Buat pesan rekap lengkap sesuai mode."""
+    """
+    Buat pesan rekap lengkap sesuai mode.
+
+    budget_override: kalau diisi, pakai nilai ini langsung tanpa query
+    Google Sheets — dipakai untuk test manual dengan data dummy
+    (lihat blok `if __name__ == "__main__"` di bawah).
+    """
     now    = datetime.now()
     today  = now.date()
-    budget = _get_budget()
+    budget = budget_override if budget_override is not None else await get_budget()
 
     if mode == "hari":
         data = _aggregate(records, today, today)
@@ -621,21 +622,13 @@ async def cmd_budget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     /budget            → status budget bulan ini
     /budget 3000000    → set budget (aktif sampai bot restart)
     """
-    args   = context.args or []
-    budget = _get_budget()
+    args = context.args or []
 
     if args:
         try:
             new_budget = int(str(args[0]).replace(".", "").replace(",", ""))
             if new_budget <= 0:
                 raise ValueError
-            os.environ["BUDGET_BULANAN"] = str(new_budget)
-            await update.message.reply_text(
-                f"✅ Budget bulanan diset ke *{rupiah(new_budget)}*\n\n"
-                f"_Untuk permanen, update `BUDGET_BULANAN` di `.env`_",
-                parse_mode="Markdown",
-            )
-            return
         except ValueError:
             await update.message.reply_text(
                 "⚠️ Format tidak valid.\nContoh: `/budget 3000000`",
@@ -643,7 +636,24 @@ async def cmd_budget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
             return
 
+        saving = await update.message.reply_text("💾 Menyimpan budget... ⏳")
+        try:
+            await set_budget(new_budget)
+            await saving.edit_text(
+                f"✅ Budget bulanan diset ke *{rupiah(new_budget)}*\n\n"
+                f"_Tersimpan permanen di Google Sheets (tab Config) — "
+                f"tidak akan hilang meski bot di-restart._",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.error(f"[/budget] Gagal simpan budget: {e}", exc_info=True)
+            await saving.edit_text(
+                "😔 Gagal menyimpan budget ke Google Sheets. Coba lagi ya."
+            )
+        return
+
     loading = await update.message.reply_text("📊 Menghitung... ⏳")
+    budget  = await get_budget()
     try:
         records = await get_all_records()
         now    = datetime.now()
@@ -715,11 +725,9 @@ if __name__ == "__main__":
         {"Tanggal": f"22/{BLN:02d}/{THN}", "Nama Item": "Listrik",  "Kategori": "Lainnya",   "Harga": 120000},
     ]
 
-    os.environ["BUDGET_BULANAN"] = "1500000"
-
     async def run():
         for mode in ["default", "hari", "kemarin", "minggu", "bulan", "tahun"]:
             print(f"\n{'='*55}\nMODE: {mode}\n{'='*55}")
-            print(await build_rekap_pesan(DUMMY, mode=mode))
+            print(await build_rekap_pesan(DUMMY, mode=mode, budget_override=1_500_000))
 
     asyncio.run(run())
