@@ -113,7 +113,16 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📊 *Lihat rekap:*\n"
         "/rekap        — rekap bulan ini\n"
         "/rekap hari   — rekap hari ini\n"
-        "/rekap bulan  — breakdown per kategori bulan ini\n\n"
+        "/rekap bulan  — breakdown per kategori bulan ini\n"
+        "/grafik       — pie chart breakdown bulan ini\n"
+        "/export       — export data ke Excel/CSV\n"
+        "/cari <kata>  — cari transaksi\n\n"
+
+        "━━━━━━━━━━━━━━━\n"
+        "🏷️ *Kelola kategori:*\n"
+        "/kategori              — lihat semua kategori\n"
+        "/tambahkategori <nama> — tambah kategori baru\n"
+        "/hapuskategori <nama>  — hapus kategori kustom\n\n"
 
         "━━━━━━━━━━━━━━━\n"
         "💡 *Tips:*\n"
@@ -141,6 +150,42 @@ async def cmd_budget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     """
     from handlers.rekap import cmd_budget as _budget
     await _budget(update, context)
+
+
+async def cmd_kategori(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/kategori — lihat semua kategori bawaan + kustom."""
+    from handlers.kategori import cmd_kategori as _kategori
+    await _kategori(update, context)
+
+
+async def cmd_tambahkategori(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/tambahkategori <nama> — tambah kategori kustom baru."""
+    from handlers.kategori import cmd_tambahkategori as _tambah
+    await _tambah(update, context)
+
+
+async def cmd_hapuskategori(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/hapuskategori <nama> — hapus kategori kustom."""
+    from handlers.kategori import cmd_hapuskategori as _hapus
+    await _hapus(update, context)
+
+
+async def cmd_grafik(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/grafik [hari|minggu|bulan|tahun|MM/YYYY] — pie chart breakdown pengeluaran."""
+    from handlers.grafik import cmd_grafik as _grafik
+    await _grafik(update, context)
+
+
+async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/export [periode] [format] — export data ke file Excel/CSV."""
+    from handlers.export import cmd_export as _export
+    await _export(update, context)
+
+
+async def cmd_cari(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/cari <kata kunci> — cari transaksi berdasarkan nama/kategori/catatan."""
+    from handlers.cari import cmd_cari as _cari
+    await _cari(update, context)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -333,6 +378,12 @@ def main() -> None:
     app.add_handler(CommandHandler("help",   cmd_help))
     app.add_handler(CommandHandler("rekap",  cmd_rekap))
     app.add_handler(CommandHandler("budget", cmd_budget))
+    app.add_handler(CommandHandler("kategori",       cmd_kategori))
+    app.add_handler(CommandHandler("tambahkategori", cmd_tambahkategori))
+    app.add_handler(CommandHandler("hapuskategori",  cmd_hapuskategori))
+    app.add_handler(CommandHandler("grafik", cmd_grafik))
+    app.add_handler(CommandHandler("export", cmd_export))
+    app.add_handler(CommandHandler("cari", cmd_cari))
 
     # ── Message handlers ──────────────────────────────────────
     app.add_handler(MessageHandler(
