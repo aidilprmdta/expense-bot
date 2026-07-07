@@ -116,7 +116,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/rekap bulan  — breakdown per kategori bulan ini\n"
         "/grafik       — pie chart breakdown bulan ini\n"
         "/export       — export data ke Excel/CSV\n"
-        "/cari <kata>  — cari transaksi\n\n"
+        "/cari <kata>  — cari transaksi\n"
+        "/hapus terakhir — hapus transaksi terakhir\n\n"
 
         "━━━━━━━━━━━━━━━\n"
         "🏷️ *Kelola kategori:*\n"
@@ -186,6 +187,12 @@ async def cmd_cari(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/cari <kata kunci> — cari transaksi berdasarkan nama/kategori/catatan."""
     from handlers.cari import cmd_cari as _cari
     await _cari(update, context)
+
+
+async def cmd_hapus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/hapus terakhir|<nomor> — hapus transaksi (dengan konfirmasi)."""
+    from handlers.hapus import cmd_hapus as _hapus
+    await _hapus(update, context)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -384,6 +391,7 @@ def main() -> None:
     app.add_handler(CommandHandler("grafik", cmd_grafik))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("cari", cmd_cari))
+    app.add_handler(CommandHandler("hapus", cmd_hapus))
 
     # ── Message handlers ──────────────────────────────────────
     app.add_handler(MessageHandler(
