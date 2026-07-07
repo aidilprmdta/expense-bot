@@ -466,6 +466,85 @@ async def set_budget(value: int) -> None:
     await asyncio.to_thread(_sync_set_budget, value)
 
 
+# ─────────────────────────────────────────────────────────────
+# KATEGORI KUSTOM — user bisa tambah kategori sendiri di luar
+# kategori bawaan (makan/transport/belanja/kesehatan/hiburan/
+# pemasukan/lainnya). Disimpan sebagai satu baris comma-separated
+# di tab "Config" yang sama dengan budget.
+# ─────────────────────────────────────────────────────────────
+
+CUSTOM_CATEGORY_KEY = "KATEGORI_KUSTOM"
+
+
+def _sync_get_custom_categories() -> list[str]:
+    """Baca daftar kategori kustom dari tab Config. Return list kosong jika belum ada."""
+    try:
+        sheet = _get_config_sheet()
+        cell  = sheet.find(CUSTOM_CATEGORY_KEY)
+        if cell is None:
+            return []
+        value = sheet.cell(cell.row, cell.col + 1).value or ""
+        return [c.strip().lower() for c in value.split(",") if c.strip()]
+    except Exception as e:
+        logger.warning(f"[sheets] Gagal baca kategori kustom: {e}")
+        return []
+
+
+def _sync_save_custom_categories(categories: list[str]) -> None:
+    """Simpan ulang seluruh daftar kategori kustom (overwrite)."""
+    sheet = _get_config_sheet()
+    value = ",".join(categories)
+    cell  = sheet.find(CUSTOM_CATEGORY_KEY)
+    if cell is None:
+        sheet.append_row([CUSTOM_CATEGORY_KEY, value])
+    else:
+        sheet.update_cell(cell.row, cell.col + 1, value)
+
+
+async def get_custom_categories() -> list[str]:
+    """Ambil daftar kategori kustom yang sudah ditambahkan user."""
+    return await asyncio.to_thread(_sync_get_custom_categories)
+
+
+async def add_custom_category(nama: str) -> tuple[bool, str]:
+    """
+    Tambah kategori kustom baru.
+    Return (berhasil: bool, pesan: str).
+    """
+    from handlers.ai_parser import KATEGORI_VALID  # local import: hindari circular import
+
+    nama = nama.strip().lower()
+    if not nama or not all(c.isalnum() or c == " " for c in nama):
+        return False, "Nama kategori tidak valid. Gunakan huruf/angka saja, tanpa simbol."
+    if len(nama) > 20:
+        return False, "Nama kategori terlalu panjang (maks 20 karakter)."
+    if nama in KATEGORI_VALID:
+        return False, f"Kategori '{nama}' sudah ada (kategori bawaan)."
+
+    current = await get_custom_categories()
+    if nama in current:
+        return False, f"Kategori '{nama}' sudah ada di daftar kustom."
+
+    current.append(nama)
+    await asyncio.to_thread(_sync_save_custom_categories, current)
+    return True, f"Kategori '{nama}' berhasil ditambahkan."
+
+
+async def remove_custom_category(nama: str) -> tuple[bool, str]:
+    """
+    Hapus kategori kustom.
+    Return (berhasil: bool, pesan: str).
+    """
+    nama    = nama.strip().lower()
+    current = await get_custom_categories()
+    if nama not in current:
+        return False, f"Kategori '{nama}' tidak ditemukan di daftar kustom."
+
+    current.remove(nama)
+    await asyncio.to_thread(_sync_save_custom_categories, current)
+    return True, f"Kategori '{nama}' berhasil dihapus."
+
+
 async def get_monthly_summary(bulan: int = None, tahun: int = None) -> dict:
     """
     Rekap pengeluaran per bulan.
