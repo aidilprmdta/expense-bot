@@ -59,13 +59,26 @@ def get_client() -> AsyncGroq:
 # SYSTEM PROMPT
 # ─────────────────────────────────────────────────────────────
 
-def _build_system_prompt() -> str:
+def _build_system_prompt(custom_categories: list[str] | None = None) -> str:
     """
     Bangun system prompt dengan tanggal hari ini yang selalu akurat.
     Dipanggil setiap request supaya tanggal tidak stale.
+
+    custom_categories: kategori tambahan yang ditambahkan user via
+    /tambahkategori, disisipkan ke aturan kategori supaya AI juga
+    memakainya kalau cocok.
     """
     hari_ini = datetime.now().strftime("%Y-%m-%d")
     kemarin  = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    custom_categories = custom_categories or []
+    blok_custom = ""
+    if custom_categories:
+        daftar = ", ".join(custom_categories)
+        blok_custom = (
+            f"\nKATEGORI TAMBAHAN (dibuat user, pakai salah satu ini kalau "
+            f"cocok dan tidak masuk kategori bawaan di atas): {daftar}\n"
+        )
 
     return f"""Kamu adalah AI pencatat keuangan pribadi. \
 Ekstrak data pengeluaran dan pemasukan dari kalimat Bahasa Indonesia.
@@ -103,7 +116,7 @@ ATURAN KATEGORI (pilih tepat satu):
                konser, liburan, jalan-jalan, wisata
   lainnya    → tagihan, listrik, air, internet, pulsa, transfer keluar,
                top-up, cicilan, sedekah, bayar utang, atau tidak masuk kategori di atas
-═══════════════════════════════
+{blok_custom}═══════════════════════════════
 ATURAN TANGGAL (format YYYY-MM-DD):
   Tidak disebutkan         → {hari_ini}
   "kemarin"               → {kemarin}
@@ -173,15 +186,18 @@ async def parse_expense(teks: str) -> list[dict]:
 
     logger.info(f"[ai_parser] Memproses: '{teks}'")
 
+    # ── Ambil kategori kustom yang sudah ditambahkan user ──────
+    custom_categories = await _get_custom_categories_safe()
+
     # ── Panggil Groq API ───────────────────────────────────────
-    raw_response = await _call_groq(teks)
+    raw_response = await _call_groq(teks, custom_categories)
     logger.debug(f"[ai_parser] Raw response: {raw_response}")
 
     # ── Parse JSON ─────────────────────────────────────────────
     data = _parse_json_safe(raw_response)
 
     # ── Normalize & validasi ───────────────────────────────────
-    items = _normalize_items(data)
+    items = _normalize_items(data, custom_categories)
 
     if not items:
         raise ValueError(
@@ -192,11 +208,25 @@ async def parse_expense(teks: str) -> list[dict]:
     return items
 
 
+async def _get_custom_categories_safe() -> list[str]:
+    """
+    Ambil kategori kustom dari Google Sheets.
+    Kalau gagal (misal Sheets belum terhubung), fallback ke list kosong
+    supaya parsing tetap jalan dengan kategori bawaan saja.
+    """
+    try:
+        from handlers.sheets import get_custom_categories  # local import: hindari circular import
+        return await get_custom_categories()
+    except Exception as e:
+        logger.warning(f"[ai_parser] Gagal ambil kategori kustom: {e}")
+        return []
+
+
 # ─────────────────────────────────────────────────────────────
 # GROQ API CALL
 # ─────────────────────────────────────────────────────────────
 
-async def _call_groq(teks: str) -> str:
+async def _call_groq(teks: str, custom_categories: list[str] | None = None) -> str:
     """
     Kirim request ke Groq dan return raw string response.
     Menggunakan response_format json_object agar output selalu JSON.
@@ -206,7 +236,7 @@ async def _call_groq(teks: str) -> str:
         response = await client.chat.completions.create(
             model=MODEL,
             messages=[
-                {"role": "system", "content": _build_system_prompt()},
+                {"role": "system", "content": _build_system_prompt(custom_categories)},
                 {"role": "user",   "content": teks},
             ],
             temperature=0.6,         # gpt-oss-20b (reasoning model) butuh >= 0.6
@@ -261,7 +291,7 @@ def _parse_json_safe(raw: str) -> dict | list:
 # NORMALISASI
 # ─────────────────────────────────────────────────────────────
 
-def _normalize_items(data: dict | list) -> list[dict]:
+def _normalize_items(data: dict | list, custom_categories: list[str] | None = None) -> list[dict]:
     """
     Ambil list item dari berbagai format output LLM.
 
@@ -271,6 +301,8 @@ def _normalize_items(data: dict | list) -> list[dict]:
       [{...}, {...}]      → langsung array (tanpa wrapper)
       {...}               → satu item langsung (tanpa wrapper)
     """
+    custom_categories = custom_categories or []
+
     if isinstance(data, dict):
         if "items" in data:
             raw_items = data["items"]
@@ -294,7 +326,7 @@ def _normalize_items(data: dict | list) -> list[dict]:
         normalized = {
             "nama"     : _normalize_nama(item.get("nama", "Item")),
             "harga"    : _normalize_harga(item.get("harga", 0)),
-            "kategori" : _normalize_kategori(item.get("kategori", "lainnya")),
+            "kategori" : _normalize_kategori(item.get("kategori", "lainnya"), custom_categories),
             "tanggal"  : _normalize_tanggal(item.get("tanggal", "")),
         }
         result.append(normalized)
@@ -348,12 +380,17 @@ def _normalize_harga(nilai) -> int:
     return 0
 
 
-def _normalize_kategori(nilai) -> str:
+def _normalize_kategori(nilai, custom_categories: list[str] | None = None) -> str:
     """
     Pastikan kategori valid. Fuzzy match untuk common variations.
+    Cek juga kategori kustom yang ditambahkan user sebelum fallback ke "lainnya".
     """
     kat = str(nilai).lower().strip()
     if kat in KATEGORI_VALID:
+        return kat
+
+    custom_categories = custom_categories or []
+    if kat in custom_categories:
         return kat
 
     # Mapping variasi kata yang mungkin keluar dari LLM
@@ -377,7 +414,16 @@ def _normalize_kategori(nilai) -> str:
         "entertainment": "hiburan", "rekreasi": "hiburan",
         "nonton": "hiburan", "game": "hiburan",
     }
-    return fuzzy.get(kat, "lainnya")
+    if kat in fuzzy:
+        return fuzzy[kat]
+
+    # Cek partial match ke kategori kustom (misal AI kasih "pendidikan anak"
+    # tapi kategori kustom yang tersimpan cuma "pendidikan")
+    for custom in custom_categories:
+        if custom in kat or kat in custom:
+            return custom
+
+    return "lainnya"
 
 
 def _normalize_tanggal(nilai: str) -> str:
