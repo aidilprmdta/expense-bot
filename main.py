@@ -117,7 +117,15 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/grafik       — pie chart breakdown bulan ini\n"
         "/export       — export data ke Excel/CSV\n"
         "/cari <kata>  — cari transaksi\n"
-        "/hapus terakhir — hapus transaksi terakhir\n\n"
+        "/hapus terakhir — hapus transaksi terakhir\n"
+        "/edit <no> field=nilai — edit transaksi\n\n"
+
+        "━━━━━━━━━━━━━━━\n"
+        "💵 *Budget:*\n"
+        "/budget            — lihat status budget bulan ini\n"
+        "/budget 3000000    — set budget bulanan\n"
+        "_Bot otomatis kirim peringatan kalau pengeluaran sudah "
+        "80% atau lewat dari budget._\n\n"
 
         "━━━━━━━━━━━━━━━\n"
         "🏷️ *Kelola kategori:*\n"
@@ -195,6 +203,12 @@ async def cmd_hapus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _hapus(update, context)
 
 
+async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/edit <nomor|terakhir> <field>=<nilai> — edit transaksi tanpa hapus ulang."""
+    from handlers.edit import cmd_edit as _edit
+    await _edit(update, context)
+
+
 # ─────────────────────────────────────────────────────────────
 # MESSAGE HANDLERS
 # ─────────────────────────────────────────────────────────────
@@ -227,6 +241,15 @@ async def handle_teks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             format_konfirmasi(items),
             parse_mode="Markdown",
         )
+
+        # ── Cek budget alert (proaktif, tidak perlu /budget manual) ──
+        try:
+            from handlers.budget_alert import cek_budget_alert
+            alert = await cek_budget_alert(items)
+            if alert:
+                await update.message.reply_text(alert, parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"[handle_teks] Gagal cek budget alert: {e}")
 
     except ValueError:
         # Teks tidak mengandung pengeluaran yang bisa diparsing
@@ -295,6 +318,15 @@ async def handle_foto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             format_struk_summary(items),
             parse_mode="Markdown",
         )
+
+        # ── 5. Cek budget alert (proaktif, tidak perlu /budget manual) ──
+        try:
+            from handlers.budget_alert import cek_budget_alert
+            alert = await cek_budget_alert(items)
+            if alert:
+                await update.message.reply_text(alert, parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"[handle_foto] Gagal cek budget alert: {e}")
 
     except ValueError as e:
         # Foto buram, bukan struk, atau tidak ada item terbaca
@@ -392,6 +424,7 @@ def main() -> None:
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("cari", cmd_cari))
     app.add_handler(CommandHandler("hapus", cmd_hapus))
+    app.add_handler(CommandHandler("edit", cmd_edit))
 
     # ── Message handlers ──────────────────────────────────────
     app.add_handler(MessageHandler(

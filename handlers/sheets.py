@@ -381,6 +381,102 @@ async def get_all_records() -> list[dict]:
 
 
 # ─────────────────────────────────────────────────────────────
+# HAPUS TRANSAKSI — delete baris tertentu dari sheet utama.
+# Nomor baris di sini adalah nomor baris ASLI di Google Sheets
+# (baris 1 = header, baris 2 = transaksi pertama, dst).
+# ─────────────────────────────────────────────────────────────
+
+def _sync_delete_row(row_number: int) -> None:
+    """Hapus satu baris di sheet utama berdasarkan nomor baris asli."""
+    try:
+        sheet = _get_sheet()
+        sheet.delete_rows(row_number)
+    except gspread.exceptions.APIError as e:
+        logger.warning(f"[sheets] API error saat hapus baris, retry: {e}")
+        _reset_connection()
+        sheet = _get_sheet()
+        sheet.delete_rows(row_number)
+
+
+async def delete_row(row_number: int) -> None:
+    """
+    Hapus satu baris transaksi dari Google Sheets.
+
+    Args:
+        row_number: nomor baris ASLI di sheet (bukan index list),
+                    baris 2 = transaksi pertama (baris 1 = header).
+    """
+    if row_number < 2:
+        raise ValueError("Nomor baris tidak valid — baris 1 adalah header.")
+    await asyncio.to_thread(_sync_delete_row, row_number)
+
+
+def _sync_get_last_transaction() -> tuple[int, dict] | None:
+    """Return (row_number, record) transaksi paling akhir, atau None jika kosong."""
+    sheet = _get_sheet()
+    records = sheet.get_all_records(numericise_ignore=["all"])
+    if not records:
+        return None
+    row_number = len(records) + 1  # +1 karena baris 1 adalah header
+    return row_number, records[-1]
+
+
+async def get_last_transaction() -> tuple[int, dict] | None:
+    """Ambil transaksi paling akhir yang tercatat, lengkap dengan nomor barisnya."""
+    return await asyncio.to_thread(_sync_get_last_transaction)
+
+
+# ─────────────────────────────────────────────────────────────
+# EDIT TRANSAKSI — update field tertentu di baris yang sudah ada,
+# tanpa perlu hapus + catat ulang.
+# ─────────────────────────────────────────────────────────────
+
+_EDIT_COLUMN_INDEX = {
+    "tanggal" : 1,  # A
+    "nama"    : 2,  # B: Nama Item
+    "kategori": 3,  # C
+    "harga"   : 4,  # D
+    "catatan" : 5,  # E
+}
+
+
+def _sync_update_row(row_number: int, updates: dict) -> None:
+    """
+    Update satu atau lebih kolom di baris tertentu.
+    updates: {"harga": 30000, "kategori": "Transport", ...}
+    """
+    try:
+        sheet = _get_sheet()
+        for field, value in updates.items():
+            col = _EDIT_COLUMN_INDEX[field]
+            sheet.update_cell(row_number, col, value)
+    except gspread.exceptions.APIError as e:
+        logger.warning(f"[sheets] API error saat update baris, retry: {e}")
+        _reset_connection()
+        sheet = _get_sheet()
+        for field, value in updates.items():
+            col = _EDIT_COLUMN_INDEX[field]
+            sheet.update_cell(row_number, col, value)
+
+
+async def update_row(row_number: int, updates: dict) -> None:
+    """
+    Update field transaksi di baris tertentu.
+
+    Args:
+        row_number: nomor baris ASLI di sheet (baris 2 = transaksi pertama)
+        updates: dict field->value, field harus salah satu dari
+                 "tanggal", "nama", "kategori", "harga", "catatan"
+    """
+    if row_number < 2:
+        raise ValueError("Nomor baris tidak valid — baris 1 adalah header.")
+    invalid_fields = set(updates.keys()) - set(_EDIT_COLUMN_INDEX.keys())
+    if invalid_fields:
+        raise ValueError(f"Field tidak dikenal: {', '.join(invalid_fields)}")
+    await asyncio.to_thread(_sync_update_row, row_number, updates)
+
+
+# ─────────────────────────────────────────────────────────────
 # BUDGET PERSISTEN — disimpan di tab "Config" pada spreadsheet
 # yang sama, supaya tidak hilang saat bot di-restart (beda
 # dengan os.environ yang cuma hidup selama proses berjalan).
