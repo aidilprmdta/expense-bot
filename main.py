@@ -118,7 +118,19 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/export       — export data ke Excel/CSV\n"
         "/cari <kata>  — cari transaksi\n"
         "/hapus terakhir — hapus transaksi terakhir\n"
-        "/edit <no> field=nilai — edit transaksi\n\n"
+        "/edit <no> field=nilai — edit transaksi\n"
+        "/banding      — bandingkan bulan ini vs lalu\n\n"
+
+        "━━━━━━━━━━━━━━━\n"
+        "🔁 *Transaksi rutin (tagihan bulanan):*\n"
+        "/rutin tambah <hari> <harga> <kategori> <nama>\n"
+        "/rutin lihat  — daftar rutin aktif\n"
+        "/rutin hapus <no> — hapus satu aturan\n\n"
+
+        "━━━━━━━━━━━━━━━\n"
+        "📬 *Laporan mingguan otomatis:*\n"
+        "/langganan aktif — mulai terima ringkasan tiap Senin pagi\n"
+        "/langganan nonaktif — berhenti terima\n\n"
 
         "━━━━━━━━━━━━━━━\n"
         "💵 *Budget:*\n"
@@ -207,6 +219,24 @@ async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/edit <nomor|terakhir> <field>=<nilai> — edit transaksi tanpa hapus ulang."""
     from handlers.edit import cmd_edit as _edit
     await _edit(update, context)
+
+
+async def cmd_banding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/banding [MM/YYYY MM/YYYY] — bandingkan pengeluaran dua bulan."""
+    from handlers.banding import cmd_banding as _banding
+    await _banding(update, context)
+
+
+async def cmd_rutin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/rutin tambah|lihat|hapus — kelola transaksi berulang (tagihan bulanan)."""
+    from handlers.rutin import cmd_rutin as _rutin
+    await _rutin(update, context)
+
+
+async def cmd_langganan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/langganan aktif|nonaktif — kelola langganan laporan mingguan otomatis."""
+    from handlers.laporan_mingguan import cmd_langganan as _langganan
+    await _langganan(update, context)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -412,6 +442,34 @@ def main() -> None:
 
     app.post_init = on_startup
 
+    # ── Job harian: cek transaksi rutin yang jatuh tempo ──────
+    from datetime import time as dtime
+    from handlers.rutin import cek_dan_catat_rutin_harian
+    from handlers.laporan_mingguan import kirim_laporan_mingguan
+
+    if app.job_queue is not None:
+        app.job_queue.run_daily(
+            cek_dan_catat_rutin_harian,
+            time=dtime(hour=8, minute=0),  # jam 08:00 waktu server
+            name="cek_rutin_harian",
+        )
+        logger.info("Job harian 'cek_rutin_harian' terdaftar (08:00).")
+
+        # PENTING: di python-telegram-bot v20+, 0=Minggu, 1=Senin, ..., 6=Sabtu
+        # (berubah dari versi lama yang 0=Senin). Jadi Senin = 1, bukan 0.
+        app.job_queue.run_daily(
+            kirim_laporan_mingguan,
+            time=dtime(hour=8, minute=0),
+            days=(1,),  # 1 = Senin
+            name="laporan_mingguan",
+        )
+        logger.info("Job mingguan 'laporan_mingguan' terdaftar (Senin 08:00).")
+    else:
+        logger.warning(
+            "JobQueue tidak tersedia — transaksi rutin & laporan mingguan TIDAK "
+            "akan otomatis jalan. Install dengan: pip install \"python-telegram-bot[job-queue]\""
+        )
+
     # ── Command handlers ──────────────────────────────────────
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("help",   cmd_help))
@@ -425,6 +483,9 @@ def main() -> None:
     app.add_handler(CommandHandler("cari", cmd_cari))
     app.add_handler(CommandHandler("hapus", cmd_hapus))
     app.add_handler(CommandHandler("edit", cmd_edit))
+    app.add_handler(CommandHandler("banding", cmd_banding))
+    app.add_handler(CommandHandler("rutin", cmd_rutin))
+    app.add_handler(CommandHandler("langganan", cmd_langganan))
 
     # ── Message handlers ──────────────────────────────────────
     app.add_handler(MessageHandler(
