@@ -197,6 +197,12 @@ async def cmd_grafik(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _grafik(update, context)
 
 
+async def cmd_statistik(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/statistik [YYYY] — statistik tahunan: bar chart, pie chart, insight."""
+    from handlers.statistik import cmd_statistik as _statistik
+    await _statistik(update, context)
+
+
 async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/export [periode] [format] — export data ke file Excel/CSV."""
     from handlers.export import cmd_export as _export
@@ -263,7 +269,7 @@ async def handle_teks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         items = await parse_expense(teks)
 
         # ── Phase 4: Simpan ke Google Sheets ──────────────────
-        from handlers.sheets import append_expenses_batch   # ada 's' di expenses
+        from handlers.sheets import append_expenses_batch, get_all_records
         await append_expenses_batch(items, catatan="via chat")
 
         # Kirim konfirmasi ke user
@@ -271,6 +277,14 @@ async def handle_teks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             format_konfirmasi(items),
             parse_mode="Markdown",
         )
+
+        # ── Deteksi pengeluaran tidak wajar ───────────────────
+        try:
+            from handlers.anomaly import check_and_alert
+            all_records = await get_all_records()
+            await check_and_alert(update, context, items, all_records)
+        except Exception:
+            pass   # anomaly check non-blocking
 
         # ── Cek budget alert (proaktif, tidak perlu /budget manual) ──
         try:
@@ -385,6 +399,14 @@ async def handle_foto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
 
 
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handler voice note → transkripsi Groq Whisper → parse → Sheets.
+    """
+    from handlers.voice import handle_voice as _hv
+    await _hv(update, context)
+
+
 async def handle_command_unknown(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -478,7 +500,8 @@ def main() -> None:
     app.add_handler(CommandHandler("kategori",       cmd_kategori))
     app.add_handler(CommandHandler("tambahkategori", cmd_tambahkategori))
     app.add_handler(CommandHandler("hapuskategori",  cmd_hapuskategori))
-    app.add_handler(CommandHandler("grafik", cmd_grafik))
+    app.add_handler(CommandHandler("grafik",     cmd_grafik))
+    app.add_handler(CommandHandler("statistik",  cmd_statistik))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("cari", cmd_cari))
     app.add_handler(CommandHandler("hapus", cmd_hapus))
@@ -495,6 +518,10 @@ def main() -> None:
     app.add_handler(MessageHandler(
         filters.PHOTO,
         handle_foto,
+    ))
+    app.add_handler(MessageHandler(
+        filters.VOICE,
+        handle_voice,
     ))
     app.add_handler(MessageHandler(
         filters.COMMAND,
