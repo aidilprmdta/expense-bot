@@ -140,6 +140,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "80% atau lewat dari budget._\n\n"
 
         "━━━━━━━━━━━━━━━\n"
+        "💰 *Saldo:*\n"
+        "/saldo             — lihat saldo saat ini\n"
+        "/saldo set 500000  — koreksi saldo manual (misal setup awal)\n"
+        "_Saldo otomatis ke-update tiap ada transaksi baru, diedit, atau dihapus._\n\n"
+
+        "━━━━━━━━━━━━━━━\n"
         "🏷️ *Kelola kategori:*\n"
         "/kategori              — lihat semua kategori\n"
         "/tambahkategori <nama> — tambah kategori baru\n"
@@ -197,12 +203,6 @@ async def cmd_grafik(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _grafik(update, context)
 
 
-async def cmd_statistik(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/statistik [YYYY] — statistik tahunan: bar chart, pie chart, insight."""
-    from handlers.statistik import cmd_statistik as _statistik
-    await _statistik(update, context)
-
-
 async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/export [periode] [format] — export data ke file Excel/CSV."""
     from handlers.export import cmd_export as _export
@@ -245,6 +245,12 @@ async def cmd_langganan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await _langganan(update, context)
 
 
+async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/saldo [set <nominal>] — lihat atau koreksi saldo berjalan."""
+    from handlers.saldo import cmd_saldo as _saldo
+    await _saldo(update, context)
+
+
 # ─────────────────────────────────────────────────────────────
 # MESSAGE HANDLERS
 # ─────────────────────────────────────────────────────────────
@@ -269,7 +275,7 @@ async def handle_teks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         items = await parse_expense(teks)
 
         # ── Phase 4: Simpan ke Google Sheets ──────────────────
-        from handlers.sheets import append_expenses_batch, get_all_records
+        from handlers.sheets import append_expenses_batch   # ada 's' di expenses
         await append_expenses_batch(items, catatan="via chat")
 
         # Kirim konfirmasi ke user
@@ -277,14 +283,6 @@ async def handle_teks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             format_konfirmasi(items),
             parse_mode="Markdown",
         )
-
-        # ── Deteksi pengeluaran tidak wajar ───────────────────
-        try:
-            from handlers.anomaly import check_and_alert
-            all_records = await get_all_records()
-            await check_and_alert(update, context, items, all_records)
-        except Exception:
-            pass   # anomaly check non-blocking
 
         # ── Cek budget alert (proaktif, tidak perlu /budget manual) ──
         try:
@@ -294,6 +292,13 @@ async def handle_teks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await update.message.reply_text(alert, parse_mode="Markdown")
         except Exception as e:
             logger.warning(f"[handle_teks] Gagal cek budget alert: {e}")
+
+        # ── Update saldo berjalan ──────────────────────────────
+        try:
+            from handlers.saldo import terapkan_delta_items
+            await terapkan_delta_items(items)
+        except Exception as e:
+            logger.warning(f"[handle_teks] Gagal update saldo: {e}")
 
     except ValueError:
         # Teks tidak mengandung pengeluaran yang bisa diparsing
@@ -372,6 +377,13 @@ async def handle_foto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception as e:
             logger.warning(f"[handle_foto] Gagal cek budget alert: {e}")
 
+        # ── 6. Update saldo berjalan ────────────────────────────
+        try:
+            from handlers.saldo import terapkan_delta_items
+            await terapkan_delta_items(items)
+        except Exception as e:
+            logger.warning(f"[handle_foto] Gagal update saldo: {e}")
+
     except ValueError as e:
         # Foto buram, bukan struk, atau tidak ada item terbaca
         logger.warning(f"[handle_foto] Tidak ada item: {e}")
@@ -397,14 +409,6 @@ async def handle_foto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "Terjadi kesalahan tidak terduga. 🙏\n"
             "Coba lagi atau ketik pengeluaran secara manual."
         )
-
-
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handler voice note → transkripsi Groq Whisper → parse → Sheets.
-    """
-    from handlers.voice import handle_voice as _hv
-    await _hv(update, context)
 
 
 async def handle_command_unknown(
@@ -500,8 +504,7 @@ def main() -> None:
     app.add_handler(CommandHandler("kategori",       cmd_kategori))
     app.add_handler(CommandHandler("tambahkategori", cmd_tambahkategori))
     app.add_handler(CommandHandler("hapuskategori",  cmd_hapuskategori))
-    app.add_handler(CommandHandler("grafik",     cmd_grafik))
-    app.add_handler(CommandHandler("statistik",  cmd_statistik))
+    app.add_handler(CommandHandler("grafik", cmd_grafik))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("cari", cmd_cari))
     app.add_handler(CommandHandler("hapus", cmd_hapus))
@@ -509,6 +512,7 @@ def main() -> None:
     app.add_handler(CommandHandler("banding", cmd_banding))
     app.add_handler(CommandHandler("rutin", cmd_rutin))
     app.add_handler(CommandHandler("langganan", cmd_langganan))
+    app.add_handler(CommandHandler("saldo", cmd_saldo))
 
     # ── Message handlers ──────────────────────────────────────
     app.add_handler(MessageHandler(
@@ -518,10 +522,6 @@ def main() -> None:
     app.add_handler(MessageHandler(
         filters.PHOTO,
         handle_foto,
-    ))
-    app.add_handler(MessageHandler(
-        filters.VOICE,
-        handle_voice,
     ))
     app.add_handler(MessageHandler(
         filters.COMMAND,
