@@ -233,6 +233,12 @@ async def cek_dan_catat_rutin_harian(context: ContextTypes.DEFAULT_TYPE) -> None
             }
             await append_expenses_batch([item], catatan="rutin otomatis")
 
+            try:
+                from handlers.saldo import terapkan_delta_items
+                await terapkan_delta_items([item])
+            except Exception as e:
+                logger.warning(f"[cek_rutin_harian] Gagal update saldo: {e}")
+
             emoji = EMOJI_KAT.get(kategori, "📌")
             await context.bot.send_message(
                 chat_id=chat_id,

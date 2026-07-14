@@ -90,6 +90,16 @@ async def cmd_hapus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         loading = await update.message.reply_text("🗑️ Menghapus... ⏳")
         try:
             await delete_row(pending["row_number"])
+
+            try:
+                from handlers.saldo import batalkan_delta_items
+                await batalkan_delta_items({
+                    "Harga": pending["harga"],
+                    "Kategori": pending.get("kategori", "lainnya"),
+                })
+            except Exception as e:
+                logger.warning(f"[/hapus] Gagal update saldo: {e}")
+
             await loading.edit_text(
                 f"✅ Transaksi *{pending['nama']}* ({rupiah(pending['harga'])}) berhasil dihapus."
             , parse_mode="Markdown")
@@ -174,6 +184,7 @@ async def cmd_hapus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "row_number": row_number,
         "nama"      : record.get("Nama Item", "Item"),
         "harga"     : _safe_int(record.get("Harga", 0)),
+        "kategori"  : record.get("Kategori", "lainnya"),
     }
     await loading.edit_text(_format_konfirmasi(record), parse_mode="Markdown")
 

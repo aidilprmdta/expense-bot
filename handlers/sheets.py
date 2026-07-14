@@ -670,6 +670,70 @@ async def set_budget(value: int) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
+# SALDO — saldo berjalan yang otomatis ter-update tiap ada
+# transaksi baru (pemasukan nambah, pengeluaran ngurangin).
+# Disimpan permanen di tab "Config" yang sama, bukan dihitung
+# ulang dari nol tiap kali (lebih cepat & konsisten).
+# ─────────────────────────────────────────────────────────────
+
+SALDO_KEY = "SALDO"
+
+
+def _sync_get_saldo() -> int:
+    """Baca nilai saldo saat ini dari tab Config. Default 0 jika belum pernah diset."""
+    try:
+        sheet = _get_config_sheet()
+        cell  = sheet.find(SALDO_KEY)
+        if cell is None:
+            return 0
+        value = sheet.cell(cell.row, cell.col + 1).value
+        cleaned = str(value).replace(".", "").replace(",", "").strip()
+        if cleaned.startswith("-"):
+            return -int(cleaned[1:] or 0)
+        return int(cleaned or 0)
+    except Exception as e:
+        logger.warning(f"[sheets] Gagal baca saldo: {e}")
+        return 0
+
+
+def _sync_set_saldo(value: int) -> None:
+    """Simpan/update nilai saldo di tab Config (overwrite langsung, bukan nambah)."""
+    sheet = _get_config_sheet()
+    cell  = sheet.find(SALDO_KEY)
+    if cell is None:
+        sheet.append_row([SALDO_KEY, value])
+    else:
+        sheet.update_cell(cell.row, cell.col + 1, value)
+
+
+async def get_saldo() -> int:
+    """Ambil saldo berjalan saat ini (bisa negatif kalau pengeluaran > pemasukan)."""
+    return await asyncio.to_thread(_sync_get_saldo)
+
+
+async def set_saldo(value: int) -> None:
+    """Set saldo ke nilai tertentu secara langsung (dipakai untuk koreksi manual)."""
+    await asyncio.to_thread(_sync_set_saldo, value)
+
+
+async def adjust_saldo(delta: int) -> int:
+    """
+    Ubah saldo dengan menambah/mengurangi delta dari nilai saat ini.
+    Delta positif = nambah saldo (pemasukan / koreksi naik).
+    Delta negatif = ngurangin saldo (pengeluaran / koreksi turun).
+
+    Return nilai saldo yang baru setelah diubah.
+
+    Dipakai otomatis tiap ada transaksi baru, diedit, atau dihapus,
+    supaya saldo selalu sinkron tanpa perlu dihitung ulang dari awal.
+    """
+    saldo_lama = await get_saldo()
+    saldo_baru = saldo_lama + delta
+    await set_saldo(saldo_baru)
+    return saldo_baru
+
+
+# ─────────────────────────────────────────────────────────────
 # KATEGORI KUSTOM — user bisa tambah kategori sendiri di luar
 # kategori bawaan (makan/transport/belanja/kesehatan/hiburan/
 # pemasukan/lainnya). Disimpan sebagai satu baris comma-separated
