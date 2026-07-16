@@ -5,9 +5,11 @@ Saldo berjalan yang otomatis ter-update tiap ada transaksi baru,
 diedit, atau dihapus — pemasukan nambah saldo, pengeluaran ngurangin.
 
 Penggunaan:
-  /saldo              → lihat saldo saat ini
-  /saldo set 500000   → koreksi manual saldo ke nilai tertentu
-                         (misal buat setup awal, saldo kas yang sudah ada)
+  /saldo                → lihat saldo saat ini
+  /saldo set 500000     → koreksi manual saldo ke nilai tertentu
+                           (misal buat setup awal, saldo kas yang sudah ada)
+  /saldo sinkronkan     → hitung ulang saldo dari SELURUH riwayat transaksi
+                           di Sheets (bukan cuma transaksi sejak fitur ini aktif)
 
 Fungsi lain (dipanggil dari main.py, hapus.py, edit.py, rutin.py):
   hitung_delta_items(items) -> int
@@ -15,6 +17,8 @@ Fungsi lain (dipanggil dari main.py, hapus.py, edit.py, rutin.py):
   batalkan_delta_items(record)     → update saldo saat transaksi DIHAPUS
                                       (kebalikan dari efek transaksi itu)
   terapkan_delta_edit(record_lama, updates) → update saldo saat DIEDIT
+  hitung_ulang_saldo_dari_riwayat() → rekonstruksi saldo dari nol berdasarkan
+                                      SEMUA record di Sheets (dipakai /saldo sinkronkan)
 """
 
 import logging
@@ -22,7 +26,7 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from handlers.sheets import get_saldo, set_saldo, adjust_saldo
+from handlers.sheets import get_saldo, set_saldo, adjust_saldo, get_all_records
 from handlers.rekap import rupiah, _safe_int
 
 logger = logging.getLogger(__name__)
@@ -31,7 +35,10 @@ HELP_TEXT = (
     "Cara pakai:\n"
     "`/saldo` — lihat saldo saat ini\n"
     "`/saldo set 500000` — koreksi manual saldo ke nilai tertentu\n"
-    "   _(dipakai misal buat setup awal, atau kalau saldo meleset)_"
+    "   _(dipakai misal buat setup awal, atau kalau saldo meleset)_\n"
+    "`/saldo sinkronkan` — hitung ulang saldo dari SELURUH riwayat transaksi\n"
+    "   _(dipakai kalau saldo kelihatan nggak sesuai riwayat asli — misal karena "
+    "ada transaksi lama dari sebelum fitur saldo ini aktif)_"
 )
 
 
@@ -117,6 +124,38 @@ async def terapkan_delta_edit(record_lama: dict, updates: dict) -> int:
     return await adjust_saldo(delta)
 
 
+async def hitung_ulang_saldo_dari_riwayat() -> tuple[int, int]:
+    """
+    Rekonstruksi saldo dari NOL berdasarkan SELURUH riwayat transaksi
+    di Sheets (bukan cuma yang tercatat sejak fitur saldo ini aktif).
+
+    Dipakai untuk /saldo sinkronkan — memperbaiki kasus di mana saldo
+    "ketinggalan" karena ada transaksi lama dari sebelum fitur saldo
+    dipasang, sehingga saldo yang ter-track cuma sebagian dari riwayat asli.
+
+    Return (saldo_lama, saldo_baru) — biar user bisa lihat selisihnya.
+    """
+    saldo_lama = await get_saldo()
+
+    try:
+        records = await get_all_records()
+    except Exception as e:
+        logger.error(f"[saldo] Gagal baca Sheets untuk sinkronisasi: {e}", exc_info=True)
+        raise
+
+    total = 0
+    for r in records:
+        harga    = _safe_int(r.get("Harga", 0))
+        kategori = str(r.get("Kategori", "")).lower().strip()
+        if kategori == "pemasukan":
+            total += harga
+        else:
+            total -= harga
+
+    await set_saldo(total)
+    return saldo_lama, total
+
+
 # ─────────────────────────────────────────────────────────────
 # TELEGRAM HANDLER
 # ─────────────────────────────────────────────────────────────
@@ -174,6 +213,41 @@ async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.error(f"[/saldo set] Gagal simpan: {e}", exc_info=True)
             await loading.edit_text(
                 f"😔 *Gagal menyimpan*\n\n`{type(e).__name__}: {str(e)[:120]}`",
+                parse_mode="Markdown",
+            )
+        return
+
+    if sub in ("sinkronkan", "sync", "hitungulang", "recalc"):
+        loading = await update.message.reply_text(
+            "🔄 Menghitung ulang saldo dari seluruh riwayat transaksi... ⏳\n"
+            "_Ini mungkin agak lama kalau riwayat transaksinya banyak._",
+            parse_mode="Markdown",
+        )
+        try:
+            saldo_lama, saldo_baru = await hitung_ulang_saldo_dari_riwayat()
+            selisih = saldo_baru - saldo_lama
+
+            if selisih == 0:
+                await loading.edit_text(
+                    f"✅ *Saldo sudah sinkron!*\n\n"
+                    f"Saldo: {rupiah(saldo_baru)}\n"
+                    f"_Tidak ada perubahan — saldo sebelumnya sudah sesuai riwayat._",
+                    parse_mode="Markdown",
+                )
+            else:
+                arah = "naik" if selisih > 0 else "turun"
+                await loading.edit_text(
+                    f"✅ *Saldo berhasil disinkronkan!*\n\n"
+                    f"Saldo lama: {rupiah(saldo_lama)}\n"
+                    f"Saldo baru: *{rupiah(saldo_baru)}*\n"
+                    f"_{arah.title()} {rupiah(abs(selisih))} setelah dihitung ulang dari "
+                    f"seluruh riwayat transaksi._",
+                    parse_mode="Markdown",
+                )
+        except Exception as e:
+            logger.error(f"[/saldo sinkronkan] Gagal: {e}", exc_info=True)
+            await loading.edit_text(
+                f"😔 *Gagal sinkronkan saldo*\n\n`{type(e).__name__}: {str(e)[:120]}`",
                 parse_mode="Markdown",
             )
         return
