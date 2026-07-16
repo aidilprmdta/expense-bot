@@ -256,14 +256,6 @@ async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # ── Update saldo kalau harga/kategori berubah ──────────────
-    if "harga" in updates_final or "kategori" in updates_final:
-        try:
-            from handlers.saldo import terapkan_delta_edit
-            await terapkan_delta_edit(record_lama, updates_final)
-        except Exception as e:
-            logger.warning(f"[/edit] Gagal update saldo: {e}")
-
     await loading.edit_text(
         f"✅ *Transaksi #{row_number} berhasil diperbarui*\n\n" + "\n".join(ringkasan_perubahan),
         parse_mode="Markdown",
