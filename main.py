@@ -143,6 +143,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "💰 *Saldo:*\n"
         "/saldo             — lihat saldo saat ini\n"
         "/saldo set 500000  — koreksi saldo manual (misal setup awal)\n"
+        "/saldo sinkronkan  — hitung ulang saldo dari seluruh riwayat transaksi\n"
         "_Saldo otomatis ke-update tiap ada transaksi baru, diedit, atau dihapus._\n\n"
 
         "━━━━━━━━━━━━━━━\n"
