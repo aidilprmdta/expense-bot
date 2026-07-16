@@ -294,12 +294,6 @@ async def handle_teks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception as e:
             logger.warning(f"[handle_teks] Gagal cek budget alert: {e}")
 
-        # ── Update saldo berjalan ──────────────────────────────
-        try:
-            from handlers.saldo import terapkan_delta_items
-            await terapkan_delta_items(items)
-        except Exception as e:
-            logger.warning(f"[handle_teks] Gagal update saldo: {e}")
 
     except ValueError:
         # Teks tidak mengandung pengeluaran yang bisa diparsing
@@ -378,12 +372,6 @@ async def handle_foto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception as e:
             logger.warning(f"[handle_foto] Gagal cek budget alert: {e}")
 
-        # ── 6. Update saldo berjalan ────────────────────────────
-        try:
-            from handlers.saldo import terapkan_delta_items
-            await terapkan_delta_items(items)
-        except Exception as e:
-            logger.warning(f"[handle_foto] Gagal update saldo: {e}")
 
     except ValueError as e:
         # Foto buram, bukan struk, atau tidak ada item terbaca
