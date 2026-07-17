@@ -22,7 +22,7 @@ from collections import defaultdict
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from handlers.sheets import get_all_records, get_budget, set_budget, get_saldo
+from handlers.sheets import get_all_records, get_budget, set_budget
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +203,7 @@ def _aggregate(records: list[dict], start: date, end: date) -> dict:
 # FORMAT SECTIONS
 # ─────────────────────────────────────────────────────────────
 
-def _fmt_hari(data: dict, tgl: date, label: str = "Hari Ini", saldo_aktual: int = 0) -> str:
+def _fmt_hari(data: dict, tgl: date, label: str = "Hari Ini") -> str:
     """
     Format rekap satu hari terpisah pemasukan dan pengeluaran.
     """
@@ -257,14 +257,10 @@ def _fmt_hari(data: dict, tgl: date, label: str = "Hari Ini", saldo_aktual: int 
     else:
         baris.append(f"⚖️ Selisih periode ini: *-{rupiah(abs(net_saldo))}*")
 
-    # Saldo TOTAL kumulatif (dari semua transaksi sepanjang waktu)
-    emoji_saldo = "💰" if saldo_aktual >= 0 else "📛"
-    baris.append(f"{emoji_saldo} *Saldo Kamu Sekarang: {rupiah(saldo_aktual)}*")
-
     return "\n".join(baris)
 
 
-def _fmt_bulan(data: dict, bulan: int, tahun: int, budget: int = 0, saldo_aktual: int = 0) -> str:
+def _fmt_bulan(data: dict, bulan: int, tahun: int, budget: int = 0) -> str:
     """
     Format rekap bulanan dengan persentase + mini bar + info budget.
     """
@@ -324,10 +320,6 @@ def _fmt_bulan(data: dict, bulan: int, tahun: int, budget: int = 0, saldo_aktual
     else:
         baris.append(f"⚖️ Selisih bulan ini: *-{rupiah(abs(net_saldo))}*")
 
-    # Saldo TOTAL kumulatif (dari semua transaksi sepanjang waktu)
-    emoji_saldo = "💰" if saldo_aktual >= 0 else "📛"
-    baris.append(f"{emoji_saldo} *Saldo Kamu Sekarang: {rupiah(saldo_aktual)}*")
-
     # Budget block
     if budget > 0:
         terpakai_pct = min(100, round(peng_total / budget * 100)) if budget else 0
@@ -345,10 +337,15 @@ def _fmt_bulan(data: dict, bulan: int, tahun: int, budget: int = 0, saldo_aktual
         else:
             baris.append(f"⚠️ *Over budget {rupiah(abs(sisa))}!*")
 
+        # Saldo = Budget - Pengeluaran + Pemasukan bulan ini
+        saldo = budget - peng_total + pem_total
+        emoji_saldo = "💰" if saldo >= 0 else "📛"
+        baris.append(f"{emoji_saldo} *Saldo (Budget + Pemasukan - Pengeluaran): {rupiah(saldo)}*")
+
     return "\n".join(baris)
 
 
-def _fmt_tahun(data: dict, tahun: int, saldo_aktual: int = 0) -> str:
+def _fmt_tahun(data: dict, tahun: int) -> str:
     """
     Format rekap tahunan.
     """
@@ -399,7 +396,7 @@ def _fmt_tahun(data: dict, tahun: int, saldo_aktual: int = 0) -> str:
     else:
         baris.append("_Tidak ada pengeluaran._")
 
-    # Selisih PERIODE INI (bukan saldo total kumulatif)
+    # Selisih PERIODE INI
     baris.append("")
     baris.append("━" * 28)
     net_saldo = pem_total - peng_total
@@ -408,14 +405,10 @@ def _fmt_tahun(data: dict, tahun: int, saldo_aktual: int = 0) -> str:
     else:
         baris.append(f"⚖️ Selisih tahun ini: *-{rupiah(abs(net_saldo))}*")
 
-    # Saldo TOTAL kumulatif (dari semua transaksi sepanjang waktu)
-    emoji_saldo = "💰" if saldo_aktual >= 0 else "📛"
-    baris.append(f"{emoji_saldo} *Saldo Kamu Sekarang: {rupiah(saldo_aktual)}*")
-
     return "\n".join(baris)
 
 
-def _fmt_minggu(data: dict, saldo_aktual: int = 0) -> str:
+def _fmt_minggu(data: dict) -> str:
     """Format rekap 7 hari terakhir."""
     today  = date.today()
     start  = today - timedelta(days=6)
@@ -471,7 +464,7 @@ def _fmt_minggu(data: dict, saldo_aktual: int = 0) -> str:
     else:
         baris.append("_Tidak ada pengeluaran._")
 
-    # Selisih PERIODE INI (bukan saldo total kumulatif)
+    # Selisih PERIODE INI
     baris.append("")
     baris.append("━" * 28)
     net_saldo = pem_total - peng_total
@@ -479,10 +472,6 @@ def _fmt_minggu(data: dict, saldo_aktual: int = 0) -> str:
         baris.append(f"⚖️ Selisih 7 hari ini: *+{rupiah(net_saldo)}*")
     else:
         baris.append(f"⚖️ Selisih 7 hari ini: *-{rupiah(abs(net_saldo))}*")
-
-    # Saldo TOTAL kumulatif (dari semua transaksi sepanjang waktu)
-    emoji_saldo = "💰" if saldo_aktual >= 0 else "📛"
-    baris.append(f"{emoji_saldo} *Saldo Kamu Sekarang: {rupiah(saldo_aktual)}*")
 
     return "\n".join(baris)
 
@@ -536,7 +525,6 @@ async def build_rekap_pesan(
     tgt_bulan     : int|None = None,
     tgt_tahun     : int|None = None,
     budget_override: int|None = None,
-    saldo_override  : int|None = None,
 ) -> str:
     """
     Buat pesan rekap lengkap sesuai mode.
@@ -544,32 +532,30 @@ async def build_rekap_pesan(
     budget_override: kalau diisi, pakai nilai ini langsung tanpa query
     Google Sheets — dipakai untuk test manual dengan data dummy
     (lihat blok `if __name__ == "__main__"` di bawah).
-    saldo_override: sama seperti budget_override, tapi untuk saldo total.
     """
     now    = datetime.now()
     today  = now.date()
     budget = budget_override if budget_override is not None else await get_budget()
-    saldo  = saldo_override if saldo_override is not None else await get_saldo()
 
     if mode == "hari":
         data = _aggregate(records, today, today)
-        return f"📊 *Rekap Keuangan*\n\n{SEP}\n{_fmt_hari(data, today, saldo_aktual=saldo)}"
+        return f"📊 *Rekap Keuangan*\n\n{SEP}\n{_fmt_hari(data, today)}"
 
     if mode == "kemarin":
         kemarin = today - timedelta(days=1)
         data    = _aggregate(records, kemarin, kemarin)
-        return f"📊 *Rekap Keuangan*\n\n{SEP}\n{_fmt_hari(data, kemarin, label='Kemarin', saldo_aktual=saldo)}"
+        return f"📊 *Rekap Keuangan*\n\n{SEP}\n{_fmt_hari(data, kemarin, label='Kemarin')}"
 
     if mode == "minggu":
         start = today - timedelta(days=6)
         data  = _aggregate(records, start, today)
-        return f"📊 *Rekap Keuangan*\n\n{SEP}\n{_fmt_minggu(data, saldo_aktual=saldo)}"
+        return f"📊 *Rekap Keuangan*\n\n{SEP}\n{_fmt_minggu(data)}"
 
     if mode == "tahun":
         start = date(now.year, 1, 1)
         end   = date(now.year, 12, 31)
         data  = _aggregate(records, start, end)
-        return f"📊 *Rekap Keuangan*\n\n{SEP}\n{_fmt_tahun(data, now.year, saldo_aktual=saldo)}"
+        return f"📊 *Rekap Keuangan*\n\n{SEP}\n{_fmt_tahun(data, now.year)}"
 
     if mode == "bulan" or (tgt_bulan and tgt_tahun):
         b     = tgt_bulan or now.month
@@ -577,7 +563,7 @@ async def build_rekap_pesan(
         start = date(t, b, 1)
         end   = date(t, b, calendar.monthrange(t, b)[1])
         data  = _aggregate(records, start, end)
-        return f"📊 *Rekap Keuangan*\n\n{SEP}\n{_fmt_bulan(data, b, t, budget, saldo_aktual=saldo)}"
+        return f"📊 *Rekap Keuangan*\n\n{SEP}\n{_fmt_bulan(data, b, t, budget)}"
 
     # default: hari ini + bulan ini
     data_hari  = _aggregate(records, today, today)
@@ -587,8 +573,8 @@ async def build_rekap_pesan(
 
     return (
         f"📊 *Rekap Keuangan*\n\n"
-        f"{SEP}\n{_fmt_hari(data_hari, today, saldo_aktual=saldo)}\n\n"
-        f"{SEP}\n{_fmt_bulan(data_bulan, now.month, now.year, budget, saldo_aktual=saldo)}"
+        f"{SEP}\n{_fmt_hari(data_hari, today)}\n\n"
+        f"{SEP}\n{_fmt_bulan(data_bulan, now.month, now.year, budget)}"
     )
 
 
@@ -786,6 +772,6 @@ if __name__ == "__main__":
     async def run():
         for mode in ["default", "hari", "kemarin", "minggu", "bulan", "tahun"]:
             print(f"\n{'='*55}\nMODE: {mode}\n{'='*55}")
-            print(await build_rekap_pesan(DUMMY, mode=mode, budget_override=1_500_000, saldo_override=2_750_000))
+            print(await build_rekap_pesan(DUMMY, mode=mode, budget_override=1_500_000))
 
     asyncio.run(run())

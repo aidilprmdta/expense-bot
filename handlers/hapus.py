@@ -91,15 +91,6 @@ async def cmd_hapus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             await delete_row(pending["row_number"])
 
-            try:
-                from handlers.saldo import batalkan_delta_items
-                await batalkan_delta_items({
-                    "Harga": pending["harga"],
-                    "Kategori": pending.get("kategori", "lainnya"),
-                })
-            except Exception as e:
-                logger.warning(f"[/hapus] Gagal update saldo: {e}")
-
             await loading.edit_text(
                 f"✅ Transaksi *{pending['nama']}* ({rupiah(pending['harga'])}) berhasil dihapus."
             , parse_mode="Markdown")
